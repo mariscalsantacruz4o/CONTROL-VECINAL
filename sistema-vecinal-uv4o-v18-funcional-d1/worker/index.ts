@@ -29,6 +29,13 @@ const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    // Cloudflare Access protege esta entrada. Una vez autenticado el usuario,
+    // mostramos el panel desde la ruta principal y mantenemos las API de
+    // administración protegidas por Access.
+    if (url.pathname === "/admin" || url.pathname === "/admin/") {
+      return Response.redirect(new URL("/#admin", request.url), 302);
+    }
+
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return handleImageOptimization(request, {
