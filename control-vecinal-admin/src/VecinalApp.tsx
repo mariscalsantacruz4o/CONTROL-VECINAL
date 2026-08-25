@@ -79,6 +79,12 @@ type Notice = {
 };
 type CardSelection = { rowIndex: number; monthIndex: number } | null;
 
+const PUBLIC_SITE_URL = "https://control-vecinal.mariscalsantacruz-4o.workers.dev";
+
+function publicNeighborUrl(token: string) {
+  return `${PUBLIC_SITE_URL}/?token=${encodeURIComponent(token)}`;
+}
+
 type AttendanceRecord = {
   id: number;
   activityId: number;
@@ -289,7 +295,7 @@ function QrTile({ neighbor }: { neighbor: Neighbor }) {
 
   useEffect(() => {
     let active = true;
-    const publicUrl = `${window.location.origin}/?token=${encodeURIComponent(neighbor.token)}`;
+    const publicUrl = publicNeighborUrl(neighbor.token);
     import("qrcode").then((QRCode) => QRCode.toDataURL(publicUrl, {
       width: 280,
       margin: 1,
@@ -711,7 +717,6 @@ export default function VecinalApp() {
     const gapY = 2;
     const startX = 14.45;
     const startY = 12.7;
-    const publicBaseUrl = `${window.location.origin}/`;
     for (let index = 0; index < activeNeighbors.length; index += 1) {
       const neighbor = activeNeighbors[index];
       if (index > 0 && index % cardsPerPage === 0) doc.addPage();
@@ -720,7 +725,7 @@ export default function VecinalApp() {
       const row = Math.floor(slot / columns);
       const x = startX + column * (cardWidth + gapX);
       const y = startY + row * (cardHeight + gapY);
-      const qr = await QRCode.toDataURL(`${publicBaseUrl}?token=${encodeURIComponent(neighbor.token)}`, { width: 500, margin: 1 });
+      const qr = await QRCode.toDataURL(publicNeighborUrl(neighbor.token), { width: 500, margin: 1 });
       doc.setDrawColor(77, 101, 130);
       doc.setLineWidth(0.25);
       doc.rect(x, y, cardWidth, cardHeight);
@@ -1061,7 +1066,7 @@ export default function VecinalApp() {
             <section className="admin-panel">
               <div className="panel-heading"><div><span>{neighbors.length} registros</span><h2>Directorio vecinal</h2></div><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR</button></div>
               <div className="neighbor-cards">
-                {neighbors.map((neighbor) => <article className="neighbor-card" key={neighbor.id}><QrTile neighbor={neighbor} /><div><span className={`status-dot ${balanceOf(neighbor) ? "has-debt" : "clear"}`}>{balanceOf(neighbor) ? "Pendiente" : "Al día"}</span><h3>{neighbor.name}</h3><p>{neighbor.street} · Lote {neighbor.lot}</p><p>{neighbor.code}</p><div className="neighbor-actions"><button onClick={() => window.open(`/?token=${encodeURIComponent(neighbor.token)}`, "_blank", "noopener,noreferrer")}>Ver tarjeta</button><button onClick={() => { setEditingNeighborId(neighbor.id); setShowNeighborForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="delete-action" onClick={() => void deleteNeighbor(neighbor)}>Eliminar</button></div></div></article>)}
+                {neighbors.map((neighbor) => <article className="neighbor-card" key={neighbor.id}><QrTile neighbor={neighbor} /><div><span className={`status-dot ${balanceOf(neighbor) ? "has-debt" : "clear"}`}>{balanceOf(neighbor) ? "Pendiente" : "Al día"}</span><h3>{neighbor.name}</h3><p>{neighbor.street} · Lote {neighbor.lot}</p><p>{neighbor.code}</p><div className="neighbor-actions"><button onClick={() => window.open(publicNeighborUrl(neighbor.token), "_blank", "noopener,noreferrer")}>Ver tarjeta</button><button onClick={() => { setEditingNeighborId(neighbor.id); setShowNeighborForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="delete-action" onClick={() => void deleteNeighbor(neighbor)}>Eliminar</button></div></div></article>)}
                 {!neighbors.length && <div className="empty-state"><strong>Aún no hay vecinos.</strong><span>Pulse “Registrar vecino” para crear el primero y generar su QR.</span></div>}
               </div>
             </section>
