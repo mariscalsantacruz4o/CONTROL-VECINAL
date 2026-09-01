@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "control-vecinal-admin",
+  "main": "./worker-dist/index.js",
+  "no_bundle": true,
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sistema-vecinal-db",
+      "database_id": "6d074eb7-ddc3-43bf-a56f-4650fd3b1589"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
