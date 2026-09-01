@@ -1078,6 +1078,7 @@ button { cursor: pointer; }
 .inline-form, .payment-form, .notice-form { display: grid; gap: 13px; border: 1px solid #dce5ef; border-radius: 20px; padding: 20px; background: white; }
 .inline-form { grid-template-columns: repeat(3, 1fr) auto; align-items: end; margin-bottom: 16px; }
 .neighbor-form { grid-template-columns: 1.25fr 1fr 0.55fr 0.75fr auto; }
+.neighbor-form .editor-help { grid-column: 1 / -1; margin-top: 0; }
 .activity-form { grid-template-columns: .75fr 1fr 1.35fr .75fr .6fr auto; }
 .inline-form label, .payment-form label, .notice-form label, .attendance-select label { color: #435168; font-size: 0.65rem; font-weight: 780; }
 input, select, textarea { width: 100%; min-height: 46px; margin-top: 7px; border: 1px solid #d3deea; border-radius: 12px; padding: 0 12px; color: var(--ink); background: white; outline: none; }
