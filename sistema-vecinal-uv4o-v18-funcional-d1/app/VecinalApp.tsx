@@ -78,6 +78,9 @@ type Notice = {
   whatsapp: string;
 };
 type CardSelection = { rowIndex: number; monthIndex: number } | null;
+type PublicLoadStatus = "checking" | "idle" | "loading" | "ready" | "error";
+
+const ADMIN_SITE_URL = "https://control-vecinal-admin.mariscalsantacruz-4o.workers.dev";
 
 type AttendanceRecord = {
   id: number;
@@ -147,23 +150,11 @@ const defaultViewLabels: ViewLabels = {
   coverSubtitle: "Tu tarjeta vecinal siempre disponible y fácil de entender.",
 };
 
-const initialNeighbors: Neighbor[] = [
-  { id: 1, code: "U.V. 4-O-001", token: "demo-martha-701", name: "Martha Mamani", street: "Av. Principal", lot: "701", phone: "", generated: 155, paid: 120, active: true },
-  { id: 2, code: "U.V. 4-O-002", token: "demo-cyntia-438", name: "Cyntia Bustillos Ala", street: "Calle Los Pinos", lot: "438", phone: "", generated: 50, paid: 0, active: true },
-  { id: 3, code: "U.V. 4-O-003", token: "demo-felipe-702", name: "Felipe Rojas", street: "Calle 4-O", lot: "702", phone: "", generated: 90, paid: 90, active: true },
-];
-
-const initialActivities: Activity[] = [
-  { id: 1, code: "ACT-001", type: "Asamblea", title: "Reunión mensual de agosto", date: "2026-08-23", fine: 50, status: "Programada", cardRowIndex: 0, cardSlotIndex: 7 },
-  { id: 2, code: "ACT-002", type: "Trabajo", title: "Limpieza de áreas comunes", date: "2026-07-12", fine: 80, status: "Cerrada", cardRowIndex: 4, cardSlotIndex: 0 },
-  { id: 3, code: "ACT-003", type: "Marcha / desfile", title: "Desfile cívico vecinal", date: "2026-08-06", fine: 60, status: "Cerrada", cardRowIndex: 3, cardSlotIndex: 0 },
-];
-
-const initialPayments: Payment[] = [
-  { id: 1, neighborId: 1, date: "2026-08-02", amount: 50, note: "Pago de cuota y multa", receipt: "REC-0001" },
-  { id: 2, neighborId: 1, date: "2026-06-15", amount: 70, note: "Pago parcial", receipt: "REC-0002" },
-  { id: 3, neighborId: 3, date: "2026-07-20", amount: 90, note: "Pago total", receipt: "REC-0003" },
-];
+// La vista pública empieza completamente vacía. Los únicos datos que puede
+// mostrar son los recibidos desde D1 para el token exacto del código QR.
+const initialNeighbors: Neighbor[] = [];
+const initialActivities: Activity[] = [];
+const initialPayments: Payment[] = [];
 
 const standardActivityTypes = ["Asamblea", "Trabajo", "Marcha / desfile", "Cuota mensual", "Cuota extra"];
 
@@ -175,9 +166,9 @@ const cardRows: CardRow[] = [
   {
     label: "Asambleas",
     kind: "attendance",
-    values: ["done", "done", "done", "done", "done", "done", "done", "pending", "empty", "empty", "empty", "empty"],
+    values: Array(12).fill("empty") as CardStatus[],
     cellLabels: [...blankDetails],
-    details: ["Asamblea general", "Reunión mensual", "Reunión mensual", "Asamblea general", "Reunión mensual", "Reunión mensual", "Asamblea general", "Reunión mensual · multa Bs 50", ...blankDetails.slice(0, 4)],
+    details: [...blankDetails],
   },
   {
     label: "Cuotas mensuales",
@@ -196,21 +187,17 @@ const cardRows: CardRow[] = [
   {
     label: "Otros",
     kind: "attendance",
-    values: ["done", ...Array(11).fill("empty")] as CardStatus[],
-    cellLabels: ["Desfile cívico", ...blankDetails.slice(1)],
-    details: ["Desfile cívico vecinal · 6 de agosto de 2026", ...blankDetails.slice(1)],
+    values: Array(12).fill("empty") as CardStatus[],
+    cellLabels: [...blankDetails],
+    details: [...blankDetails],
   },
   {
     label: "Trabajos",
     kind: "attendance",
-    values: ["done", ...Array(23).fill("empty")] as CardStatus[],
-    cellLabels: ["Limpieza", ...blankWorkDetails.slice(1)],
-    details: ["Limpieza de áreas comunes · 12 de julio de 2026", ...blankWorkDetails.slice(1)],
+    values: Array(24).fill("empty") as CardStatus[],
+    cellLabels: [...blankWorkDetails],
+    details: [...blankWorkDetails],
   },
-];
-
-const demoDebtItems = [
-  { concept: "Multa por inasistencia", detail: "Reunión mensual de agosto", date: "23 de agosto de 2026", amount: 35 },
 ];
 
 const navItems: Array<{ id: AdminSection; label: string; icon: string }> = [
@@ -267,8 +254,14 @@ function cardRowsFromRecords(activities: Activity[], attendance: AttendanceRecor
 
 async function apiRequest<T>(url: string, init?: RequestInit) {
   const response = await fetch(url, init);
-  const data = await response.json().catch(() => ({})) as T & { error?: string };
+  const contentType = response.headers.get("content-type") ?? "";
+  const data = contentType.includes("application/json")
+    ? await response.json().catch(() => ({})) as T & { error?: string }
+    : {} as T & { error?: string };
   if (!response.ok) throw new Error(data.error || "No se pudo completar la operación");
+  if (!contentType.includes("application/json")) {
+    throw new Error("El servidor no devolvió información válida. Recargue la tarjeta.");
+  }
   return data;
 }
 
@@ -301,7 +294,7 @@ export default function VecinalApp() {
   const [neighbors, setNeighbors] = useState(initialNeighbors);
   const [activities, setActivities] = useState(initialActivities);
   const [payments, setPayments] = useState(initialPayments);
-  const [cardData, setCardData] = useState<CardRow[]>(cardRows);
+  const [cardData, setCardData] = useState<CardRow[]>(emptyCardRows);
   const [viewEditorMode, setViewEditorMode] = useState<ViewEditorMode>("tarjeta");
   const [themeSettings, setThemeSettings] = useState<ThemeSettings>(defaultTheme);
   const [viewLabels, setViewLabels] = useState<ViewLabels>(defaultViewLabels);
@@ -314,25 +307,25 @@ export default function VecinalApp() {
   const [showActivityForm, setShowActivityForm] = useState(false);
   const [editingActivityId, setEditingActivityId] = useState<number | null>(null);
   const [notice, setNotice] = useState<Notice>({
-    title: "Asamblea general de vecinos",
-    body: "Revisaremos seguridad, luminarias y trabajos comunitarios de la zona.",
-    active: true,
+    title: "",
+    body: "",
+    active: false,
     image: "",
-    eventType: "Asamblea general",
-    eventDate: "2026-08-23",
-    eventTime: "19:00",
-    eventPlace: "Sede vecinal",
+    eventType: "",
+    eventDate: "",
+    eventTime: "",
+    eventPlace: "",
     whatsapp: "",
   });
-  const [selectedActivity, setSelectedActivity] = useState(activities[0].id);
-  const [attendanceByActivity, setAttendanceByActivity] = useState<Record<number, Record<number, AttendanceStatus>>>(
-    Object.fromEntries(initialActivities.map((activity) => [activity.id, Object.fromEntries(initialNeighbors.map((neighbor) => [neighbor.id, "Presente"]))]))
-  );
+  const [selectedActivity, setSelectedActivity] = useState(0);
+  const [attendanceByActivity, setAttendanceByActivity] = useState<Record<number, Record<number, AttendanceStatus>>>({});
   const [activityCharges, setActivityCharges] = useState<ActivityCharge[]>([]);
   const [toast, setToast] = useState("");
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminError, setAdminError] = useState("");
-  const [isPublicRecord, setIsPublicRecord] = useState(false);
+  const [publicLoadStatus, setPublicLoadStatus] = useState<PublicLoadStatus>("checking");
+  const [publicLoadError, setPublicLoadError] = useState("");
+  const [publicRetryKey, setPublicRetryKey] = useState(0);
 
   const demoNeighbor = neighbors[0] ?? { id: 0, code: "", token: "", name: "SIN VECINO REGISTRADO", street: "", lot: "—", phone: "", generated: 0, paid: 0, active: false };
   const demoBalance = balanceOf(demoNeighbor);
@@ -371,8 +364,8 @@ export default function VecinalApp() {
     [payments, demoNeighbor.id]
   );
   const visitorDebtItems = useMemo<DebtItem[]>(
-    () => [...(isPublicRecord ? [] : demoDebtItems), ...activityCharges.filter((charge) => charge.neighborId === demoNeighbor.id)],
-    [activityCharges, demoNeighbor.id, isPublicRecord]
+    () => activityCharges.filter((charge) => charge.neighborId === demoNeighbor.id),
+    [activityCharges, demoNeighbor.id]
   );
 
   function notify(message: string) {
@@ -407,7 +400,6 @@ export default function VecinalApp() {
     try {
       const state = await apiRequest<AdminState>("/api/admin/state", { cache: "no-store" });
       setNeighbors(state.neighbors);
-      setIsPublicRecord(true);
       setActivities(state.activities);
       setPayments(state.payments);
       const recordsByActivity: Record<number, Record<number, AttendanceStatus>> = {};
@@ -446,59 +438,94 @@ export default function VecinalApp() {
 
   useEffect(() => {
     const token = new URLSearchParams(window.location.search).get("token");
-    if (!token) return;
+    if (!token) {
+      setPublicLoadStatus("idle");
+      return;
+    }
     let active = true;
-    apiRequest<PublicNeighborState>(`/api/neighbor/${encodeURIComponent(token)}`, { cache: "no-store" }).then((state) => {
-      if (!active) return;
-      const publicNeighbor: Neighbor = {
-        ...state.neighbor,
-        token,
-        phone: "",
-        active: true,
-        generated: state.totals.generated,
-        paid: state.totals.paid,
-      };
-      const publicActivities: Activity[] = state.cardEntries.map((entry) => ({
-        id: entry.id,
-        code: `ACT-${String(entry.id).padStart(3, "0")}`,
-        type: entry.type,
-        title: entry.title,
-        date: entry.date,
-        fine: entry.amount,
-        status: entry.status === "Programada" ? "Programada" : "Cerrada",
-        cardRowIndex: entry.cardRowIndex,
-        cardSlotIndex: entry.cardSlotIndex,
-      }));
-      const publicAttendance: AttendanceRecord[] = state.cardEntries.flatMap((entry) => entry.status === "Programada" ? [] : [{
-        id: entry.id,
-        activityId: entry.id,
-        neighborId: publicNeighbor.id,
-        status: entry.status,
-        charge: entry.charge,
-        note: "",
-      }]);
-      setNeighbors([publicNeighbor]);
-      setIsPublicRecord(true);
-      setActivities(publicActivities);
-      setPayments(state.payments.map((payment) => ({ ...payment, neighborId: publicNeighbor.id })));
-      setCardData(cardRowsFromRecords(publicActivities, publicAttendance, publicNeighbor.id));
-      setActivityCharges(publicAttendance.flatMap<ActivityCharge>((record) => {
-        if (!record.charge) return [];
-        const activity = publicActivities.find((item) => item.id === record.activityId);
-        if (!activity) return [];
-        return [{ neighborId: publicNeighbor.id, activityId: activity.id, concept: `Multa · ${activity.type}`, detail: activity.title, date: formatDate(activity.date), amount: record.charge }];
-      }));
-      applyNotice(state.notice);
-      applySettings(state.settings);
-      setArea("vecino");
-      setVisitorView("sencillo");
-    }).catch((error) => {
-      if (active) setAdminError(error instanceof Error ? error.message : "No se encontró la tarjeta vecinal");
-    }).finally(() => {
-      if (active) setAdminLoading(false);
-    });
+    setNeighbors([]);
+    setActivities([]);
+    setPayments([]);
+    setCardData(emptyCardRows());
+    setActivityCharges([]);
+    setPublicLoadStatus("loading");
+    setPublicLoadError("");
+
+    async function loadPublicCard() {
+      try {
+        let state: PublicNeighborState | null = null;
+        let lastError: unknown = null;
+
+        // Un reintento corto evita que una conexión móvil inestable deje una
+        // tarjeta vacía, pero nunca reemplaza al vecino con datos ficticios.
+        for (let attempt = 0; attempt < 2 && !state; attempt += 1) {
+          try {
+            state = await apiRequest<PublicNeighborState>(`/api/neighbor/${encodeURIComponent(token ?? "")}`, { cache: "no-store" });
+          } catch (error) {
+            lastError = error;
+            if (attempt === 0) await new Promise((resolve) => window.setTimeout(resolve, 650));
+          }
+        }
+        if (!state) throw lastError ?? new Error("No se encontró la tarjeta vecinal");
+        if (!active) return;
+
+        const publicNeighbor: Neighbor = {
+          ...state.neighbor,
+          token: token ?? "",
+          phone: "",
+          active: true,
+          generated: state.totals.generated,
+          paid: state.totals.paid,
+        };
+        const publicActivities: Activity[] = state.cardEntries.map((entry) => ({
+          id: entry.id,
+          code: `ACT-${String(entry.id).padStart(3, "0")}`,
+          type: entry.type,
+          title: entry.title,
+          date: entry.date,
+          fine: entry.amount,
+          status: entry.status === "Programada" ? "Programada" : "Cerrada",
+          cardRowIndex: entry.cardRowIndex,
+          cardSlotIndex: entry.cardSlotIndex,
+        }));
+        const publicAttendance: AttendanceRecord[] = state.cardEntries.flatMap((entry) => entry.status === "Programada" ? [] : [{
+          id: entry.id,
+          activityId: entry.id,
+          neighborId: publicNeighbor.id,
+          status: entry.status,
+          charge: entry.charge,
+          note: "",
+        }]);
+        setNeighbors([publicNeighbor]);
+        setActivities(publicActivities);
+        setPayments(state.payments.map((payment) => ({ ...payment, neighborId: publicNeighbor.id })));
+        setCardData(cardRowsFromRecords(publicActivities, publicAttendance, publicNeighbor.id));
+        setActivityCharges(publicAttendance.flatMap<ActivityCharge>((record) => {
+          if (!record.charge) return [];
+          const activity = publicActivities.find((item) => item.id === record.activityId);
+          if (!activity) return [];
+          return [{ neighborId: publicNeighbor.id, activityId: activity.id, concept: `Multa · ${activity.type}`, detail: activity.title, date: formatDate(activity.date), amount: record.charge }];
+        }));
+        applyNotice(state.notice);
+        applySettings(state.settings);
+        setArea("vecino");
+        setVisitorView("sencillo");
+        setPublicLoadStatus("ready");
+      } catch (error) {
+        if (!active) return;
+        setNeighbors([]);
+        setActivities([]);
+        setPayments([]);
+        setCardData(emptyCardRows());
+        setActivityCharges([]);
+        setPublicLoadError(error instanceof Error ? error.message : "No se encontró la tarjeta vecinal");
+        setPublicLoadStatus("error");
+      }
+    }
+
+    void loadPublicCard();
     return () => { active = false; };
-  }, []);
+  }, [publicRetryKey]);
 
   useEffect(() => {
     if (!selectedCardCell) return;
@@ -510,7 +537,13 @@ export default function VecinalApp() {
   }, [selectedCardCell]);
 
   useEffect(() => {
-    const syncAreaWithAddress = () => setArea(window.location.pathname.startsWith("/admin") || window.location.hash === "#admin" ? "admin" : "vecino");
+    const syncAreaWithAddress = () => {
+      if (window.location.pathname.startsWith("/admin") || window.location.hash === "#admin") {
+        window.location.replace(ADMIN_SITE_URL);
+        return;
+      }
+      setArea("vecino");
+    };
     syncAreaWithAddress();
     window.addEventListener("hashchange", syncAreaWithAddress);
     return () => window.removeEventListener("hashchange", syncAreaWithAddress);
@@ -525,10 +558,7 @@ export default function VecinalApp() {
   }, [area]);
 
   function openAdmin(target: AdminSection = "resumen") {
-    setSection(target);
-    setArea("admin");
-    window.history.replaceState(null, "", "/admin");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.location.assign(`${ADMIN_SITE_URL}/#${target}`);
   }
 
   function openNeighbor() {
@@ -869,11 +899,41 @@ export default function VecinalApp() {
   }
 
   if (area === "vecino") {
+    if (publicLoadStatus !== "ready") {
+      return (
+        <main className="public-card-gate" style={themeStyle}>
+          <section className={`public-card-message ${publicLoadStatus === "error" ? "error" : ""}`} role={publicLoadStatus === "error" ? "alert" : "status"}>
+            <div className="public-card-mark" aria-hidden="true">{publicLoadStatus === "error" ? "!" : "U.V. 4-O"}</div>
+            {publicLoadStatus === "error" ? (
+              <>
+                <span>Tarjeta vecinal</span>
+                <h1>No pudimos abrir la información de este QR</h1>
+                <p>{publicLoadError || "Revise su conexión e inténtelo nuevamente."}</p>
+                <button type="button" onClick={() => setPublicRetryKey((value) => value + 1)}>Intentar de nuevo</button>
+                <small>Por seguridad no mostraremos datos de otro vecino.</small>
+              </>
+            ) : publicLoadStatus === "idle" ? (
+              <>
+                <span>Sistema Vecinal Digital</span>
+                <h1>Abra su tarjeta mediante el código QR</h1>
+                <p>Esta dirección necesita el código personal generado por la directiva.</p>
+              </>
+            ) : (
+              <>
+                <span>Sistema Vecinal Digital</span>
+                <h1>Abriendo su tarjeta vecinal…</h1>
+                <p>Estamos consultando la información registrada por la directiva.</p>
+                <div className="public-card-progress" aria-hidden="true"><i /></div>
+              </>
+            )}
+          </section>
+        </main>
+      );
+    }
+
     if (visitorView === "sencillo") {
       return (
         <main className="visitor-page card-page" id="modo-sencillo" style={themeStyle}>
-          {adminLoading && <div className="public-data-status">Abriendo su tarjeta vecinal…</div>}
-          {adminError && <div className="public-data-status error"><strong>No pudimos abrir esta tarjeta.</strong><span>{adminError}</span></div>}
           <section className="physical-card-frame">
           <div className="physical-card physical-card-vertical">
             <header className="simple-card-header">
