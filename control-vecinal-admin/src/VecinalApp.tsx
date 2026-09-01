@@ -153,24 +153,6 @@ const defaultViewLabels: ViewLabels = {
   coverSubtitle: "Tu tarjeta vecinal siempre disponible y fácil de entender.",
 };
 
-const initialNeighbors: Neighbor[] = [
-  { id: 1, code: "U.V. 4-O-001", token: "demo-martha-701", name: "Martha Mamani", street: "Av. Principal", lot: "701", phone: "", generated: 155, paid: 120, active: true },
-  { id: 2, code: "U.V. 4-O-002", token: "demo-cyntia-438", name: "Cyntia Bustillos Ala", street: "Calle Los Pinos", lot: "438", phone: "", generated: 50, paid: 0, active: true },
-  { id: 3, code: "U.V. 4-O-003", token: "demo-felipe-702", name: "Felipe Rojas", street: "Calle 4-O", lot: "702", phone: "", generated: 90, paid: 90, active: true },
-];
-
-const initialActivities: Activity[] = [
-  { id: 1, code: "ACT-001", type: "Asamblea", title: "Reunión mensual de agosto", date: "2026-08-23", fine: 50, status: "Programada", cardRowIndex: 0, cardSlotIndex: 7 },
-  { id: 2, code: "ACT-002", type: "Trabajo", title: "Limpieza de áreas comunes", date: "2026-07-12", fine: 80, status: "Cerrada", cardRowIndex: 4, cardSlotIndex: 0 },
-  { id: 3, code: "ACT-003", type: "Marcha / desfile", title: "Desfile cívico vecinal", date: "2026-08-06", fine: 60, status: "Cerrada", cardRowIndex: 3, cardSlotIndex: 0 },
-];
-
-const initialPayments: Payment[] = [
-  { id: 1, neighborId: 1, date: "2026-08-02", amount: 50, note: "Pago de cuota y multa", receipt: "REC-0001" },
-  { id: 2, neighborId: 1, date: "2026-06-15", amount: 70, note: "Pago parcial", receipt: "REC-0002" },
-  { id: 3, neighborId: 3, date: "2026-07-20", amount: 90, note: "Pago total", receipt: "REC-0003" },
-];
-
 const standardActivityTypes = ["Asamblea", "Trabajo", "Marcha / desfile", "Cuota mensual", "Cuota extra"];
 
 const monthNames = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
@@ -181,9 +163,9 @@ const cardRows: CardRow[] = [
   {
     label: "Asambleas",
     kind: "attendance",
-    values: ["done", "done", "done", "done", "done", "done", "done", "pending", "empty", "empty", "empty", "empty"],
+    values: Array(12).fill("empty") as CardStatus[],
     cellLabels: [...blankDetails],
-    details: ["Asamblea general", "Reunión mensual", "Reunión mensual", "Asamblea general", "Reunión mensual", "Reunión mensual", "Asamblea general", "Reunión mensual · multa Bs 50", ...blankDetails.slice(0, 4)],
+    details: [...blankDetails],
   },
   {
     label: "Cuotas mensuales",
@@ -202,21 +184,17 @@ const cardRows: CardRow[] = [
   {
     label: "Otros",
     kind: "attendance",
-    values: ["done", ...Array(11).fill("empty")] as CardStatus[],
-    cellLabels: ["Desfile cívico", ...blankDetails.slice(1)],
-    details: ["Desfile cívico vecinal · 6 de agosto de 2026", ...blankDetails.slice(1)],
+    values: Array(12).fill("empty") as CardStatus[],
+    cellLabels: [...blankDetails],
+    details: [...blankDetails],
   },
   {
     label: "Trabajos",
     kind: "attendance",
-    values: ["done", ...Array(23).fill("empty")] as CardStatus[],
-    cellLabels: ["Limpieza", ...blankWorkDetails.slice(1)],
-    details: ["Limpieza de áreas comunes · 12 de julio de 2026", ...blankWorkDetails.slice(1)],
+    values: Array(24).fill("empty") as CardStatus[],
+    cellLabels: [...blankWorkDetails],
+    details: [...blankWorkDetails],
   },
-];
-
-const demoDebtItems = [
-  { concept: "Multa por inasistencia", detail: "Reunión mensual de agosto", date: "23 de agosto de 2026", amount: 35 },
 ];
 
 const navItems: Array<{ id: AdminSection; label: string; icon: string }> = [
@@ -273,8 +251,12 @@ function cardRowsFromRecords(activities: Activity[], attendance: AttendanceRecor
 
 async function apiRequest<T>(url: string, init?: RequestInit) {
   const response = await fetch(url, init);
-  const data = await response.json().catch(() => ({})) as T & { error?: string };
+  const contentType = response.headers.get("content-type") ?? "";
+  const data = contentType.includes("application/json")
+    ? await response.json().catch(() => ({})) as T & { error?: string }
+    : {} as T & { error?: string };
   if (!response.ok) throw new Error(data.error || "No se pudo completar la operación");
+  if (!contentType.includes("application/json")) throw new Error("El servidor devolvió una respuesta inválida");
   return data;
 }
 
@@ -332,14 +314,14 @@ export default function VecinalApp() {
   const [showActivityForm, setShowActivityForm] = useState(false);
   const [editingActivityId, setEditingActivityId] = useState<number | null>(null);
   const [notice, setNotice] = useState<Notice>({
-    title: "Asamblea general de vecinos",
-    body: "Revisaremos seguridad, luminarias y trabajos comunitarios de la zona.",
+    title: "",
+    body: "",
     active: false,
     image: "",
-    eventType: "Asamblea general",
-    eventDate: "2026-08-23",
-    eventTime: "19:00",
-    eventPlace: "Sede vecinal",
+    eventType: "",
+    eventDate: "",
+    eventTime: "",
+    eventPlace: "",
     whatsapp: "",
   });
   const [selectedActivity, setSelectedActivity] = useState(0);
@@ -348,7 +330,6 @@ export default function VecinalApp() {
   const [toast, setToast] = useState("");
   const [adminLoading, setAdminLoading] = useState(true);
   const [adminError, setAdminError] = useState("");
-  const [isPublicRecord, setIsPublicRecord] = useState(false);
 
   const demoNeighbor = neighbors[0] ?? { id: 0, code: "", token: "", name: "SIN VECINO REGISTRADO", street: "", lot: "—", phone: "", generated: 0, paid: 0, active: false };
   const demoBalance = balanceOf(demoNeighbor);
@@ -387,8 +368,8 @@ export default function VecinalApp() {
     [payments, demoNeighbor.id]
   );
   const visitorDebtItems = useMemo<DebtItem[]>(
-    () => [...(isPublicRecord ? [] : demoDebtItems), ...activityCharges.filter((charge) => charge.neighborId === demoNeighbor.id)],
-    [activityCharges, demoNeighbor.id, isPublicRecord]
+    () => activityCharges.filter((charge) => charge.neighborId === demoNeighbor.id),
+    [activityCharges, demoNeighbor.id]
   );
 
   function notify(message: string) {
@@ -424,7 +405,6 @@ export default function VecinalApp() {
       const response = await apiRequest<unknown>("/api/admin/state", { cache: "no-store" });
       const state = normalizeAdminState(response);
       setNeighbors(state.neighbors);
-      setIsPublicRecord(true);
       setActivities(state.activities);
       setPayments(state.payments);
       const recordsByActivity: Record<number, Record<number, AttendanceStatus>> = {};
@@ -455,6 +435,13 @@ export default function VecinalApp() {
       applyNotice(state.notice);
       applySettings(state.settings);
     } catch (error) {
+      setNeighbors([]);
+      setActivities([]);
+      setPayments([]);
+      setAttendanceByActivity({});
+      setActivityCharges([]);
+      setCardData(emptyCardRows());
+      setSelectedActivity(0);
       setAdminError(error instanceof Error ? error.message : "No se pudo cargar la base de datos");
     } finally {
       setAdminLoading(false);
@@ -496,9 +483,11 @@ export default function VecinalApp() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") ?? "").trim();
-    const street = String(form.get("street") ?? "").trim();
-    const lot = String(form.get("lot") ?? "").trim();
-    if (!name || !street || !lot) return;
+    const enteredStreet = String(form.get("street") ?? "").trim();
+    const enteredLot = String(form.get("lot") ?? "").trim();
+    const street = enteredStreet || "POR COMPLETAR";
+    const lot = enteredLot || "—";
+    if (!name) return;
     try {
       await apiRequest("/api/admin/neighbors", {
         method: editingNeighbor ? "PATCH" : "POST",
@@ -509,7 +498,11 @@ export default function VecinalApp() {
       setEditingNeighborId(null);
       setShowNeighborForm(false);
       event.currentTarget.reset();
-      notify(editingNeighbor ? "Datos del vecino corregidos" : "Vecino registrado y QR generado");
+      notify(editingNeighbor
+        ? "Datos del vecino corregidos; su QR sigue siendo el mismo"
+        : enteredStreet && enteredLot
+          ? "Vecino registrado y QR generado"
+          : "Registro provisional creado; complete calle y lote después sin cambiar el QR");
     } catch (error) {
       notify(error instanceof Error ? error.message : "No se pudo guardar el vecino");
     }
@@ -706,17 +699,19 @@ export default function VecinalApp() {
   async function downloadQrPdf() {
     notify("Preparando PDF con todos los QR…");
     const [{ jsPDF }, QRCode] = await Promise.all([import("jspdf"), import("qrcode")]);
-    const doc = new jsPDF({ unit: "mm", format: "letter", orientation: "portrait" });
+    const doc = new jsPDF({ unit: "mm", format: "letter", orientation: "portrait", compress: true });
     const activeNeighbors = neighbors.filter((neighbor) => neighbor.active);
-    const cardWidth = 35;
-    const cardHeight = 30;
+    const cardWidth = 38;
+    const cardHeight = 37;
     const columns = 5;
-    const rows = 8;
+    const rows = 6;
     const cardsPerPage = columns * rows;
-    const gapX = 3;
-    const gapY = 2;
-    const startX = 14.45;
-    const startY = 12.7;
+    const gapX = 2;
+    const gapY = 4;
+    const occupiedWidth = columns * cardWidth + (columns - 1) * gapX;
+    const occupiedHeight = rows * cardHeight + (rows - 1) * gapY;
+    const startX = (doc.internal.pageSize.getWidth() - occupiedWidth) / 2;
+    const startY = (doc.internal.pageSize.getHeight() - occupiedHeight) / 2;
     for (let index = 0; index < activeNeighbors.length; index += 1) {
       const neighbor = activeNeighbors[index];
       if (index > 0 && index % cardsPerPage === 0) doc.addPage();
@@ -725,17 +720,41 @@ export default function VecinalApp() {
       const row = Math.floor(slot / columns);
       const x = startX + column * (cardWidth + gapX);
       const y = startY + row * (cardHeight + gapY);
-      const qr = await QRCode.toDataURL(publicNeighborUrl(neighbor.token), { width: 500, margin: 1 });
+      const qr = QRCode.create(publicNeighborUrl(neighbor.token), { errorCorrectionLevel: "M" });
       doc.setDrawColor(77, 101, 130);
       doc.setLineWidth(0.25);
       doc.rect(x, y, cardWidth, cardHeight);
-      doc.addImage(qr, "PNG", x + 8.25, y + 1.2, 18.5, 18.5);
+      const qrX = x + 4;
+      const qrY = y + 0.8;
+      const qrSize = 30;
+      const quietModules = 4;
+      const moduleSize = qrSize / (qr.modules.size + quietModules * 2);
+      const modulesX = qrX + quietModules * moduleSize;
+      const modulesY = qrY + quietModules * moduleSize;
+      doc.setFillColor(255, 255, 255);
+      doc.rect(qrX, qrY, qrSize, qrSize, "F");
+      doc.setFillColor(0, 0, 0);
+      for (let moduleRow = 0; moduleRow < qr.modules.size; moduleRow += 1) {
+        let runStart = -1;
+        for (let moduleColumn = 0; moduleColumn <= qr.modules.size; moduleColumn += 1) {
+          const isDark = moduleColumn < qr.modules.size && qr.modules.get(moduleRow, moduleColumn) === 1;
+          if (isDark && runStart < 0) runStart = moduleColumn;
+          if (!isDark && runStart >= 0) {
+            doc.rect(
+              modulesX + runStart * moduleSize,
+              modulesY + moduleRow * moduleSize,
+              (moduleColumn - runStart) * moduleSize + 0.01,
+              moduleSize + 0.01,
+              "F",
+            );
+            runStart = -1;
+          }
+        }
+      }
       doc.setFont("helvetica", "bold");
-      doc.setFontSize(5.4);
-      doc.text(neighbor.name.toUpperCase(), x + cardWidth / 2, y + 22.3, { align: "center", maxWidth: 32 });
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(5.8);
-      doc.text(`LOTE ${neighbor.lot}`, x + cardWidth / 2, y + 28, { align: "center" });
+      doc.setFontSize(5);
+      const nameLines = doc.splitTextToSize(neighbor.name.toUpperCase(), 35).slice(0, 2);
+      doc.text(nameLines, x + cardWidth / 2, y + 32.5, { align: "center", lineHeightFactor: 0.85 });
     }
     doc.save("QR_VECINOS_UV_4-O_2026.pdf");
     notify("PDF de QR descargado");
@@ -1050,13 +1069,14 @@ export default function VecinalApp() {
         )}
         {section === "vecinos" && (
           <div className="admin-section">
-            <SectionIntro title="Vecinos registrados" text="Registre una sola vez. El QR y la tarjeta del vecino se preparan automáticamente." action="Registrar vecino" onAction={() => { setEditingNeighborId(null); setShowNeighborForm((value) => !value); }} />
+            <SectionIntro title="Vecinos registrados" text="Puede comenzar solamente con el nombre. Al completar calle, lote o teléfono después, el QR impreso seguirá siendo el mismo." action="Registrar vecino" onAction={() => { setEditingNeighborId(null); setShowNeighborForm((value) => !value); }} />
             {showNeighborForm && (
               <form className="inline-form neighbor-form" key={editingNeighbor?.id ?? "new-neighbor"} onSubmit={addNeighbor}>
                 <label>Nombre completo<input name="name" defaultValue={editingNeighbor?.name ?? ""} required placeholder="Ej. María Flores" /></label>
-                <label>Calle o avenida<input name="street" defaultValue={editingNeighbor?.street ?? ""} required placeholder="Ej. Calle Los Pinos" /></label>
-                <label>Número de lote<input name="lot" defaultValue={editingNeighbor?.lot ?? ""} required placeholder="Ej. 705" /></label>
+                <label>Calle o avenida (puede completar después)<input name="street" defaultValue={editingNeighbor?.street === "POR COMPLETAR" ? "" : editingNeighbor?.street ?? ""} placeholder="Ej. Calle Los Pinos" /></label>
+                <label>Número de lote (puede completar después)<input name="lot" defaultValue={editingNeighbor?.lot === "—" ? "" : editingNeighbor?.lot ?? ""} placeholder="Ej. 705" /></label>
                 <label>Teléfono opcional<input name="phone" defaultValue={editingNeighbor?.phone ?? ""} placeholder="Ej. 70000000" /></label>
+                <p className="editor-help">Si todavía no conoce los demás datos, escriba únicamente el nombre y guarde. Después use Editar: el QR ya impreso no cambiará.</p>
                 <div className="activity-form-actions">
                   <button type="submit" className="primary-action">{editingNeighbor ? "Guardar corrección" : "Guardar y generar QR"}</button>
                   {editingNeighbor && <button type="button" className="cancel-action" onClick={() => { setEditingNeighborId(null); setShowNeighborForm(false); }}>Cancelar</button>}
@@ -1162,7 +1182,7 @@ export default function VecinalApp() {
         {section === "reportes" && (
           <div className="admin-section">
             <SectionIntro title="Reportes y respaldos" text="Descargue documentos listos para imprimir y copias editables para su archivo mensual." />
-            <div className="report-grid"><article className="report-card featured"><span>QR</span><h2>Todos los QR de vecinos</h2><p>Hoja carta con hasta 40 etiquetas por página. Cada etiqueta mide 3,5 cm × 3 cm e incluye nombre y lote.</p><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR</button></article><article className="report-card"><span>CSV</span><h2>Reporte de deudores</h2><p>Listado actualizado de vecinos con saldo pendiente.</p><button onClick={downloadDebtorsCsv}>Descargar deudores</button></article><article className="report-card"><span>PDF</span><h2>Resumen mensual</h2><p>Actividades, multas generadas y pagos del mes actual.</p><button onClick={() => void downloadMonthlySummary()}>Generar resumen</button></article><article className="report-card"><span>↺</span><h2>Respaldo completo</h2><p>Copia de vecinos, actividades, asistencias, pagos, avisos y configuración.</p><button onClick={downloadFullBackup}>Descargar respaldo</button></article></div>
+            <div className="report-grid"><article className="report-card featured"><span>QR</span><h2>Todos los QR de vecinos</h2><p>Hoja carta con hasta 30 etiquetas por página. Cada recuadro mide aproximadamente 3,8 × 3,7 cm e incluye un QR de 3 × 3 cm con solamente el nombre.</p><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR grandes</button></article><article className="report-card"><span>CSV</span><h2>Reporte de deudores</h2><p>Listado actualizado de vecinos con saldo pendiente.</p><button onClick={downloadDebtorsCsv}>Descargar deudores</button></article><article className="report-card"><span>PDF</span><h2>Resumen mensual</h2><p>Actividades, multas generadas y pagos del mes actual.</p><button onClick={() => void downloadMonthlySummary()}>Generar resumen</button></article><article className="report-card"><span>↺</span><h2>Respaldo completo</h2><p>Copia de vecinos, actividades, asistencias, pagos, avisos y configuración.</p><button onClick={downloadFullBackup}>Descargar respaldo</button></article></div>
             <div className="backup-status"><div className="backup-check">✓</div><div><strong>Datos protegidos</strong><p>La base principal está en Cloudflare D1 y el respaldo se descarga en formato JSON.</p></div><span>Gestión {viewLabels.managementYear}</span></div>
           </div>
         )}
