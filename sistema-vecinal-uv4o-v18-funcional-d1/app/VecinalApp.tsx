@@ -247,7 +247,10 @@ function cardRowsFromRecords(activities: Activity[], attendance: AttendanceRecor
     const record = attendanceByActivity.get(activity.id);
     row.values[activity.cardSlotIndex] = !record ? "empty" : record.status === "Faltó" ? "pending" : "done";
     row.cellLabels[activity.cardSlotIndex] = shortCardLabel(activity.type, activity.title, activity.fine);
-    row.details[activity.cardSlotIndex] = `${activity.title} · ${formatDate(activity.date)}${record ? ` · ${record.status}` : " · Programada"}${record?.charge ? ` · Multa Bs ${formatBs(record.charge)}` : ""}`;
+    // La ventana ya muestra el resultado y el monto en campos separados.
+    // Aquí dejamos solamente el detalle y la fecha para evitar repetir o
+    // destacar innecesariamente una falta y su multa.
+    row.details[activity.cardSlotIndex] = `${activity.title} · ${formatDate(activity.date)}`;
   }
   return rows;
 }
@@ -944,7 +947,6 @@ export default function VecinalApp() {
               <span><small>Nombre completo</small><strong>{demoNeighbor.name.toUpperCase()}</strong></span>
               <span><small>Calle / avenida</small><strong>{demoNeighbor.street.toUpperCase()}</strong></span>
             </div>
-            {notice.active && <NextEventBanner notice={notice} />}
             <p className="card-touch-help"><span aria-hidden="true">☝</span> Toque cualquier cuadro con información para ver su detalle.</p>
             <div className="summary-control" aria-label="Tarjeta vecinal resumida">
               {cardData.map((row, rowIndex) => (
@@ -969,7 +971,6 @@ export default function VecinalApp() {
               ))}
             </div>
             <DebtBreakdown total={demoBalance} items={visitorDebtItems} />
-            <a className="compact-whatsapp" href={whatsappHref} target="_blank" rel="noreferrer"><span aria-hidden="true">?</span><b>¿Tiene alguna duda?</b><small>Presione aquí para escribirnos por WhatsApp</small></a>
           </div>
           </section>
           {selectedCardCell && selectedCellRow && <CardDetailDialog row={selectedCellRow} monthIndex={selectedCardCell.monthIndex} status={selectedCellStatus} onClose={() => setSelectedCardCell(null)} />}
@@ -1295,6 +1296,7 @@ function NextEventBanner({ notice, wide = false }: { notice: Notice; wide?: bool
 
 function CardDetailDialog({ row, monthIndex, status, onClose }: { row: CardRow; monthIndex: number; status: CardStatus; onClose: () => void }) {
   const statusLabel = status === "done" ? (row.kind === "attendance" ? "Asistió" : "Pagado") : status === "pending" ? (row.kind === "attendance" ? "No asistió" : "Pendiente de pago") : "Actividad programada";
+  const dialogTitle = status === "empty" ? "Actividad programada" : row.kind === "attendance" ? "Registro de asistencia" : "Registro de pago";
   const detail = row.details[monthIndex] || "No hay una observación adicional registrada.";
   const slotName = fullMonthNames[monthIndex] ?? `Cuadro ${monthIndex + 1}`;
   const fine = detail.match(/Bs\s*(\d+(?:[.,]\d+)?)/i)?.[1];
@@ -1303,7 +1305,7 @@ function CardDetailDialog({ row, monthIndex, status, onClose }: { row: CardRow; 
       <button type="button" className="dialog-close" onClick={onClose} aria-label="Cerrar detalle">×</button>
       <div className={`dialog-status ${status}`} aria-hidden="true">{status === "done" ? "✓" : status === "pending" ? "×" : "•"}</div>
       <span>{row.label} · {slotName}</span>
-      <h2 id="cell-dialog-title">{statusLabel}</h2>
+      <h2 id="cell-dialog-title">{dialogTitle}</h2>
       <p>{detail}</p>
       <dl><div><dt>Resultado</dt><dd>{statusLabel}</dd></div>{fine && <div><dt>Monto registrado</dt><dd>Bs {fine}</dd></div>}</dl>
       <button type="button" className="dialog-understood" onClick={onClose}>Entendido</button>

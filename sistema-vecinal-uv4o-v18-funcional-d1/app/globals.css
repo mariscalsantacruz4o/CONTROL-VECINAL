@@ -1276,7 +1276,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 }
 
 @media (max-width: 480px) {
-  .visitor-page { padding-inline: 4px; }
+  .visitor-page { padding-inline: 2px; }
   .finance-grid { gap: 8px; }
   .finance-grid article { padding: 15px; }
   .quick-actions, .summary-grid, .report-grid { grid-template-columns: 1fr; }
@@ -1284,7 +1284,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .qr-image, .qr-loading { width: 92px; height: 92px; }
   .neighbor-actions { flex-wrap: wrap; }
   .month-control-row { grid-template-columns: 78px minmax(0, 1fr); padding-inline: 9px; }
-  .physical-card-vertical { padding: 6px; }
+  .physical-card-frame { padding: 3px; }
+  .physical-card-vertical { padding: 5px; }
   .simple-card-header { grid-template-columns: 1fr auto; }
   .simple-card-title { padding-left: 0; }
   .simple-card-title p { font-size: .72rem; line-height: 1.05; }
@@ -1292,14 +1293,19 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .simple-lot-badge { min-width: 67px; min-height: 50px; }
   .simple-lot-badge small { max-width: 64px; font-size: .41rem; }
   .simple-lot-badge strong { font-size: 1.17rem; }
-  .simple-owner-data { grid-template-columns: 1.35fr 1fr; gap: 6px; }
-  .simple-owner-data small { font-size: .39rem; }
-  .simple-owner-data strong { font-size: .57rem; }
-  .summary-month { min-height: 28px; border: 0; }
-  .summary-category.with-month-labels .summary-month { min-height: 35px; }
-  .summary-month > span { font-size: clamp(.31rem, 1.45vw, .4rem); }
-  .summary-month > b { font-size: .92rem; }
-  .summary-month > small { display: -webkit-box; overflow: hidden; font-size: clamp(.3rem, 1.3vw, .38rem); line-height: 1.05; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .simple-owner-data { grid-template-columns: 1fr; gap: 5px; padding-block: 7px; }
+  .simple-owner-data span { width: 100%; }
+  .simple-owner-data small { font-size: .43rem; }
+  .simple-owner-data strong { font-size: clamp(.66rem, 3.2vw, .82rem); line-height: 1.12; }
+  .card-touch-help { margin-top: 6px; font-size: .51rem; }
+  .summary-control { gap: 6px; margin-top: 6px; }
+  .summary-category > header { min-height: 21px; }
+  .summary-category h2 { font-size: .61rem; }
+  .summary-month { min-height: 36px; border: 0; }
+  .summary-category.with-month-labels .summary-month { min-height: 45px; }
+  .summary-month > span { font-size: clamp(.34rem, 1.55vw, .43rem); }
+  .summary-month > b { font-size: 1.05rem; }
+  .summary-month > small { display: -webkit-box; overflow: hidden; font-size: clamp(.32rem, 1.4vw, .41rem); line-height: 1.05; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
   .debt-breakdown > header, .debt-lines article, .debt-breakdown > footer { padding-inline: 12px; }
   .cell-dialog { padding: 21px; }
   .cell-dialog dl { grid-template-columns: 1fr; }
