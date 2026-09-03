@@ -27,7 +27,8 @@ type Activity = {
   cardSlotIndex: number;
 };
 
-type DebtItem = { concept: string; detail: string; date: string; amount: number };
+type DebtCategoryId = "asambleas" | "cuotas-mensuales" | "cuotas-extras" | "otros" | "trabajos";
+type DebtItem = { concept: string; detail: string; date: string; amount: number; category?: DebtCategoryId; sortDate?: string };
 type ActivityCharge = DebtItem & { neighborId: number; activityId: number };
 
 type Payment = {
@@ -150,6 +151,14 @@ const defaultViewLabels: ViewLabels = {
   coverSubtitle: "Tu tarjeta vecinal siempre disponible y fácil de entender.",
 };
 
+const debtCategories: Array<{ id: DebtCategoryId; label: string }> = [
+  { id: "asambleas", label: "Asambleas" },
+  { id: "cuotas-mensuales", label: "Cuotas mensuales" },
+  { id: "cuotas-extras", label: "Cuotas extras" },
+  { id: "otros", label: "Otros" },
+  { id: "trabajos", label: "Trabajos" },
+];
+
 // La vista pública empieza completamente vacía. Los únicos datos que puede
 // mostrar son los recibidos desde D1 para el token exacto del código QR.
 const initialNeighbors: Neighbor[] = [];
@@ -216,7 +225,64 @@ function formatBs(value: number) {
 }
 
 function formatDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return "Fecha por definir";
   return new Intl.DateTimeFormat("es-BO", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }).format(new Date(`${value}T00:00:00Z`));
+}
+
+function debtCategoryFromRowIndex(rowIndex: number): DebtCategoryId {
+  return debtCategories[rowIndex]?.id ?? "otros";
+}
+
+function outstandingDebtItems(items: DebtItem[], paidAmount: number) {
+  let paymentAvailable = Math.max(0, paidAmount);
+  return [...items]
+    .sort((first, second) => (first.sortDate ?? "").localeCompare(second.sortDate ?? ""))
+    .flatMap<DebtItem>((item) => {
+      const applied = Math.min(item.amount, paymentAvailable);
+      paymentAvailable -= applied;
+      const pendingAmount = Math.max(0, item.amount - applied);
+      return pendingAmount > 0 ? [{ ...item, amount: pendingAmount }] : [];
+    });
+}
+
+function readImageFile(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(new Error("No se pudo leer la fotografía"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadBrowserImage(source: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("La fotografía no tiene un formato válido"));
+    image.src = source;
+  });
+}
+
+async function prepareNoticeImage(file: File) {
+  if (!/^image\/(?:jpeg|png|webp)$/i.test(file.type)) throw new Error("Use una fotografía JPG, PNG o WEBP");
+  if (file.size > 10 * 1024 * 1024) throw new Error("La fotografía debe pesar menos de 10 MB");
+  const source = await readImageFile(file);
+  const image = await loadBrowserImage(source);
+  const maximumEdge = 1200;
+  const scale = Math.min(1, maximumEdge / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("No se pudo preparar la fotografía");
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  for (const quality of [0.82, 0.7, 0.58]) {
+    const result = canvas.toDataURL("image/jpeg", quality);
+    if (result.length <= 800_000) return result;
+  }
+  throw new Error("La fotografía es demasiado grande. Elija otra imagen");
 }
 
 function balanceOf(neighbor: Neighbor) {
@@ -304,6 +370,9 @@ export default function VecinalApp() {
   const [selectedCardCategory, setSelectedCardCategory] = useState(0);
   const [selectedCardMonth, setSelectedCardMonth] = useState(0);
   const [selectedCardCell, setSelectedCardCell] = useState<CardSelection>(null);
+  const [showDebtDetail, setShowDebtDetail] = useState(false);
+  const [noticeDismissed, setNoticeDismissed] = useState(false);
+  const [noticeImageBusy, setNoticeImageBusy] = useState(false);
   const [detailedIntro] = useState("Revise los doce meses y toque cualquier símbolo verde o rojo para abrir la explicación exacta del registro.");
   const [showNeighborForm, setShowNeighborForm] = useState(false);
   const [editingNeighborId, setEditingNeighborId] = useState<number | null>(null);
@@ -370,6 +439,10 @@ export default function VecinalApp() {
     () => activityCharges.filter((charge) => charge.neighborId === demoNeighbor.id),
     [activityCharges, demoNeighbor.id]
   );
+  const visitorOutstandingDebtItems = useMemo(
+    () => outstandingDebtItems(visitorDebtItems, demoNeighbor.paid),
+    [visitorDebtItems, demoNeighbor.paid]
+  );
 
   function notify(message: string) {
     setToast(message);
@@ -395,6 +468,20 @@ export default function VecinalApp() {
     if (!settings) return;
     setThemeSettings((current) => ({ ...current, ...settings.theme }));
     setViewLabels((current) => ({ ...current, ...settings.labels, managementYear: settings.managementYear || current.managementYear }));
+  }
+
+  async function selectNoticeImage(file?: File) {
+    if (!file) return;
+    setNoticeImageBusy(true);
+    try {
+      const image = await prepareNoticeImage(file);
+      setNotice((current) => ({ ...current, image }));
+      notify("Fotografía preparada para publicar");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No se pudo preparar la fotografía");
+    } finally {
+      setNoticeImageBusy(false);
+    }
   }
 
   async function loadAdminState(showProgress = true) {
@@ -424,6 +511,8 @@ export default function VecinalApp() {
           detail: activity.title,
           date: formatDate(activity.date),
           amount: record.charge,
+          category: debtCategoryFromRowIndex(activity.cardRowIndex),
+          sortDate: activity.date,
         }];
       }));
       const firstActivityId = state.activities[0]?.id ?? 0;
@@ -451,6 +540,8 @@ export default function VecinalApp() {
     setPayments([]);
     setCardData(emptyCardRows());
     setActivityCharges([]);
+    setShowDebtDetail(false);
+    setNoticeDismissed(false);
     setPublicLoadStatus("loading");
     setPublicLoadError("");
 
@@ -507,7 +598,7 @@ export default function VecinalApp() {
           if (!record.charge) return [];
           const activity = publicActivities.find((item) => item.id === record.activityId);
           if (!activity) return [];
-          return [{ neighborId: publicNeighbor.id, activityId: activity.id, concept: `Multa · ${activity.type}`, detail: activity.title, date: formatDate(activity.date), amount: record.charge }];
+          return [{ neighborId: publicNeighbor.id, activityId: activity.id, concept: `Multa · ${activity.type}`, detail: activity.title, date: formatDate(activity.date), amount: record.charge, category: debtCategoryFromRowIndex(activity.cardRowIndex), sortDate: activity.date }];
         }));
         applyNotice(state.notice);
         applySettings(state.settings);
@@ -531,13 +622,17 @@ export default function VecinalApp() {
   }, [publicRetryKey]);
 
   useEffect(() => {
-    if (!selectedCardCell) return;
+    const noticeIsOpen = notice.active && !noticeDismissed;
+    if (!selectedCardCell && !showDebtDetail && !noticeIsOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedCardCell(null);
+      if (event.key !== "Escape") return;
+      setSelectedCardCell(null);
+      setShowDebtDetail(false);
+      setNoticeDismissed(true);
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [selectedCardCell]);
+  }, [selectedCardCell, showDebtDetail, notice.active, noticeDismissed]);
 
   useEffect(() => {
     const syncAreaWithAddress = () => {
@@ -970,10 +1065,12 @@ export default function VecinalApp() {
                 </section>
               ))}
             </div>
-            <DebtBreakdown total={demoBalance} items={visitorDebtItems} />
+            <DebtSummary onOpen={() => setShowDebtDetail(true)} />
           </div>
           </section>
+          {notice.active && !noticeDismissed && <NoticeAnnouncement notice={notice} onClose={() => setNoticeDismissed(true)} />}
           {selectedCardCell && selectedCellRow && <CardDetailDialog row={selectedCellRow} monthIndex={selectedCardCell.monthIndex} status={selectedCellStatus} onClose={() => setSelectedCardCell(null)} />}
+          {showDebtDetail && <DebtDetailDialog items={visitorOutstandingDebtItems} onClose={() => setShowDebtDetail(false)} />}
         </main>
       );
     }
@@ -1264,7 +1361,7 @@ export default function VecinalApp() {
         {section === "avisos" && (
           <div className="admin-section">
             <SectionIntro title="Avisos para los vecinos" text="Publique el próximo evento y sus datos. Aparecerá en la tarjeta que abre cada QR." />
-            <div className="notice-admin-grid"><form className="notice-form" onSubmit={publishNotice}><div className="form-two-cols"><label>Tipo de evento<select name="eventType" defaultValue={notice.eventType}><option>Asamblea general</option><option>Marcha o desfile</option><option>Trabajo comunitario</option><option>Otro evento</option></select></label><label>Título<input name="title" defaultValue={notice.title} required /></label></div><div className="form-three-cols"><label>Fecha<input name="eventDate" type="date" defaultValue={notice.eventDate} required /></label><label>Hora<input name="eventTime" type="time" defaultValue={notice.eventTime} required /></label><label>Lugar<input name="eventPlace" defaultValue={notice.eventPlace} required /></label></div><label>Descripción<textarea name="body" defaultValue={notice.body} rows={3} required /></label><label>WhatsApp de la directiva<input name="whatsapp" defaultValue={notice.whatsapp} inputMode="tel" placeholder="Ej. 59170000000" /></label><label>Fotografía opcional<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) setNotice((current) => ({ ...current, image: URL.createObjectURL(file) })); }} /></label><button className="primary-action" type="submit">Publicar próximo evento</button></form><article className="notice-preview"><span>Vista previa del vecino</span><div className="notice-photo" style={notice.image ? { backgroundImage: `url(${notice.image})` } : undefined}>{!notice.image && <><strong>U.V. 4-O</strong><small>Próximo evento</small></>}</div><div><b>{notice.eventType}</b><h3>{notice.title}</h3><p>{formatDate(notice.eventDate)} · {notice.eventTime} · {notice.eventPlace}</p></div></article></div>
+            <div className="notice-admin-grid"><form className="notice-form" onSubmit={publishNotice}><div className="form-two-cols"><label>Tipo de evento<select name="eventType" defaultValue={notice.eventType}><option>Asamblea general</option><option>Marcha o desfile</option><option>Trabajo comunitario</option><option>Otro evento</option></select></label><label>Título<input name="title" defaultValue={notice.title} required /></label></div><div className="form-three-cols"><label>Fecha<input name="eventDate" type="date" defaultValue={notice.eventDate} required /></label><label>Hora<input name="eventTime" type="time" defaultValue={notice.eventTime} required /></label><label>Lugar<input name="eventPlace" defaultValue={notice.eventPlace} required /></label></div><label>Descripción<textarea name="body" defaultValue={notice.body} rows={3} required /></label><label>WhatsApp de la directiva<input name="whatsapp" defaultValue={notice.whatsapp} inputMode="tel" placeholder="Ej. 59170000000" /></label><label>Fotografía del anuncio<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => void selectNoticeImage(event.target.files?.[0])} /><small>{noticeImageBusy ? "Preparando fotografía…" : notice.image ? "Fotografía lista para publicar" : "Puede publicar el aviso con o sin fotografía"}</small></label><button className="primary-action" type="submit" disabled={noticeImageBusy}>{noticeImageBusy ? "Preparando fotografía…" : "Publicar aviso"}</button></form><article className="notice-preview"><span>Vista previa del vecino</span><div className="notice-photo" style={notice.image ? { backgroundImage: `url(${notice.image})` } : undefined}>{!notice.image && <><strong>U.V. 4-O</strong><small>Aviso vecinal</small></>}</div><div><b>{notice.eventType}</b><h3>{notice.title}</h3><p>{formatDate(notice.eventDate)} · {notice.eventTime} · {notice.eventPlace}</p></div></article></div>
           </div>
         )}
         {section === "reportes" && (
@@ -1309,6 +1406,59 @@ function CardDetailDialog({ row, monthIndex, status, onClose }: { row: CardRow; 
       <p>{detail}</p>
       <dl><div><dt>Resultado</dt><dd>{statusLabel}</dd></div>{fine && <div><dt>Monto registrado</dt><dd>Bs {fine}</dd></div>}</dl>
       <button type="button" className="dialog-understood" onClick={onClose}>Entendido</button>
+    </section>
+  </div>;
+}
+
+function DebtSummary({ onOpen }: { onOpen: () => void }) {
+  return <button type="button" className="debt-summary-trigger" onClick={onOpen} aria-haspopup="dialog">
+    <span aria-hidden="true">Bs</span>
+    <span><strong>Detalle de deudas pendientes</strong><small>Toque aquí para revisar por categoría</small></span>
+    <b aria-hidden="true">›</b>
+  </button>;
+}
+
+function DebtDetailDialog({ items, onClose }: { items: DebtItem[]; onClose: () => void }) {
+  const groups = debtCategories.map((category) => {
+    const categoryItems = items.filter((item) => item.category === category.id);
+    return { ...category, items: categoryItems, subtotal: categoryItems.reduce((sum, item) => sum + item.amount, 0) };
+  });
+  return <div className="debt-dialog-backdrop">
+    <section className="debt-dialog" role="dialog" aria-modal="true" aria-labelledby="debt-dialog-title">
+      <button type="button" className="dialog-close" onClick={onClose} aria-label="Cerrar detalle de deudas">×</button>
+      <header><span>Resumen por categoría</span><h2 id="debt-dialog-title">Detalle de deudas pendientes</h2><p>Cada apartado muestra únicamente el monto que corresponde a esa categoría.</p></header>
+      <div className="debt-category-list">
+        {groups.map((group) => <section className={`debt-category ${group.subtotal > 0 ? "has-debt" : "clear"}`} key={group.id}>
+          <header><h3>{group.label}</h3><strong>Bs {formatBs(group.subtotal)}</strong></header>
+          {group.items.length > 0 && <div className="debt-category-items">
+            {group.items.map((item, index) => <article key={`${group.id}-${item.detail}-${item.date}-${index}`}>
+              <div><strong>{item.detail}</strong><small>{item.date}</small></div>
+              <b>Bs {formatBs(item.amount)}</b>
+            </article>)}
+          </div>}
+        </section>)}
+      </div>
+      <button type="button" className="dialog-understood" onClick={onClose}>Entendido</button>
+    </section>
+  </div>;
+}
+
+function NoticeAnnouncement({ notice, onClose }: { notice: Notice; onClose: () => void }) {
+  return <div className="notice-popup-backdrop">
+    <section className="notice-popup" role="dialog" aria-modal="true" aria-labelledby="notice-popup-title">
+      <button type="button" className="notice-popup-close" onClick={onClose} aria-label="Cerrar aviso">×</button>
+      {notice.image ? <img className="notice-popup-image" src={notice.image} alt={`Aviso: ${notice.title}`} /> : <div className="notice-popup-placeholder" aria-hidden="true"><span>U.V. 4-O</span><strong>{notice.eventType || "Aviso vecinal"}</strong></div>}
+      <div className="notice-popup-content">
+        <span>Aviso vecinal · {notice.eventType}</span>
+        <h2 id="notice-popup-title">{notice.title}</h2>
+        {notice.body && <p>{notice.body}</p>}
+        <div className="notice-popup-meta">
+          <span><b>Fecha</b>{formatDate(notice.eventDate)}</span>
+          <span><b>Hora</b>{notice.eventTime}</span>
+          <span><b>Lugar</b>{notice.eventPlace}</span>
+        </div>
+        <button type="button" onClick={onClose}>Aceptar y ver mi tarjeta</button>
+      </div>
     </section>
   </div>;
 }
