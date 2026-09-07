@@ -8,15 +8,25 @@ export function requireAdmin(request: Request) {
   const identity = adminIdentity(request);
   return identity
     ? { identity, error: null }
-    : { identity: null, error: Response.json({ error: "Acceso administrativo requerido" }, { status: 401 }) };
+    : {
+        identity: null,
+        error: Response.json(
+          { error: "Acceso administrativo requerido" },
+          { status: 401, headers: { "cache-control": "private, no-store, max-age=0" } },
+        ),
+      };
 }
 
 export function apiError(error: unknown) {
   const message = error instanceof Error ? error.message : "Error inesperado";
+  const isDuplicateLot = message.includes("LOT_DUPLICADO");
   const isConstraint = message.includes("UNIQUE constraint failed") || message.includes("CHECK constraint failed");
   return Response.json(
-    { error: isConstraint ? "El registro se repite o contiene un valor inválido" : message },
-    { status: isConstraint ? 409 : 500 },
+    { error: isDuplicateLot ? "Ese número de lote ya está registrado" : isConstraint ? "El registro se repite o contiene un valor inválido" : message },
+    {
+      status: isDuplicateLot || isConstraint ? 409 : 500,
+      headers: { "cache-control": "private, no-store, max-age=0" },
+    },
   );
 }
 
@@ -33,4 +43,3 @@ export function centsToMoney(value: number) {
 export function cleanText(value: unknown, maximum = 180) {
   return String(value ?? "").trim().slice(0, maximum);
 }
-

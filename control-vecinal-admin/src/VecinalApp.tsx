@@ -212,6 +212,18 @@ function formatBs(value: number) {
   return new Intl.NumberFormat("es-BO", { maximumFractionDigits: 2 }).format(value);
 }
 
+function searchableText(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("es-BO")
+    .trim();
+}
+
+function normalizedLotKey(value: string) {
+  return value.replace(/\s+/g, "").toLocaleUpperCase("es-BO").trim();
+}
+
 function formatDate(value: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return "Fecha por definir";
   return new Intl.DateTimeFormat("es-BO", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" }).format(new Date(`${value}T00:00:00Z`));
@@ -340,6 +352,7 @@ export default function VecinalApp() {
   const [visitorView, setVisitorView] = useState<VisitorView>("sencillo");
   const [section, setSection] = useState<AdminSection>("resumen");
   const [neighbors, setNeighbors] = useState<Neighbor[]>([]);
+  const [neighborSearch, setNeighborSearch] = useState("");
   const [activities, setActivities] = useState<Activity[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [cardData, setCardData] = useState<CardRow[]>(() => emptyCardRows());
@@ -381,6 +394,22 @@ export default function VecinalApp() {
   const selectedActivityData = activities.find((activity) => activity.id === selectedActivity) ?? activities[0];
   const editingActivity = editingActivityId === null ? null : activities.find((activity) => activity.id === editingActivityId) ?? null;
   const editingNeighbor = editingNeighborId === null ? null : neighbors.find((neighbor) => neighbor.id === editingNeighborId) ?? null;
+  const filteredNeighbors = useMemo(() => {
+    const query = searchableText(neighborSearch);
+    if (!query) return neighbors;
+    return neighbors.filter((neighbor) =>
+      searchableText(neighbor.name).includes(query) || searchableText(neighbor.lot).includes(query)
+    );
+  }, [neighborSearch, neighbors]);
+  const duplicateLotGroups = useMemo(() => {
+    const groups = new Map<string, Neighbor[]>();
+    for (const neighbor of neighbors) {
+      const key = normalizedLotKey(neighbor.lot);
+      if (!key || key === "—") continue;
+      groups.set(key, [...(groups.get(key) ?? []), neighbor]);
+    }
+    return [...groups.values()].filter((group) => group.length > 1);
+  }, [neighbors]);
   const editingActivityType = !editingActivity ? "Asamblea" : standardActivityTypes.includes(editingActivity.type) ? editingActivity.type : "Otro personalizado";
   const editingCustomType = editingActivity && !standardActivityTypes.includes(editingActivity.type) ? editingActivity.type : "";
   const selectedAttendance = attendanceByActivity[selectedActivity] ?? {};
@@ -544,6 +573,18 @@ export default function VecinalApp() {
     const street = enteredStreet || "POR COMPLETAR";
     const lot = enteredLot || "—";
     if (!name) return;
+    const lotChanged = !editingNeighbor || normalizedLotKey(editingNeighbor.lot) !== normalizedLotKey(enteredLot);
+    const duplicateLot = lotChanged && enteredLot && normalizedLotKey(enteredLot) !== "—"
+      ? neighbors.find((neighbor) =>
+          neighbor.id !== editingNeighbor?.id
+          && neighbor.lot !== "—"
+          && normalizedLotKey(neighbor.lot) === normalizedLotKey(enteredLot)
+        )
+      : undefined;
+    if (duplicateLot) {
+      notify(`El lote ${enteredLot} ya está registrado a nombre de ${duplicateLot.name}`);
+      return;
+    }
     try {
       await apiRequest("/api/admin/neighbors", {
         method: editingNeighbor ? "PATCH" : "POST",
@@ -1125,12 +1166,12 @@ export default function VecinalApp() {
         )}
         {section === "vecinos" && (
           <div className="admin-section">
-            <SectionIntro title="Vecinos registrados" text="Puede comenzar solamente con el nombre. Al completar calle, lote o teléfono después, el QR impreso seguirá siendo el mismo." action="Registrar vecino" onAction={() => { setEditingNeighborId(null); setShowNeighborForm((value) => !value); }} />
+            <SectionIntro title="Vecinos registrados" text="Busque por nombre o lote. Los nombres pueden repetirse, pero cada número de lote real pertenece a un solo registro." action="Registrar vecino" onAction={() => { setEditingNeighborId(null); setShowNeighborForm((value) => !value); }} />
             {showNeighborForm && (
               <form className="inline-form neighbor-form" key={editingNeighbor?.id ?? "new-neighbor"} onSubmit={addNeighbor}>
                 <label>Nombre completo<input name="name" defaultValue={editingNeighbor?.name ?? ""} required placeholder="Ej. María Flores" /></label>
                 <label>Calle o avenida (puede completar después)<input name="street" defaultValue={editingNeighbor?.street === "POR COMPLETAR" ? "" : editingNeighbor?.street ?? ""} placeholder="Ej. Calle Los Pinos" /></label>
-                <label>Número de lote (puede completar después)<input name="lot" defaultValue={editingNeighbor?.lot === "—" ? "" : editingNeighbor?.lot ?? ""} placeholder="Ej. 705" /></label>
+                <label>Número de lote (único; puede completar después)<input name="lot" defaultValue={editingNeighbor?.lot === "—" ? "" : editingNeighbor?.lot ?? ""} placeholder="Ej. 705" /></label>
                 <label>Teléfono opcional<input name="phone" defaultValue={editingNeighbor?.phone ?? ""} placeholder="Ej. 70000000" /></label>
                 <p className="editor-help">Si todavía no conoce los demás datos, escriba únicamente el nombre y guarde. Después use Editar: el QR ya impreso no cambiará.</p>
                 <div className="activity-form-actions">
@@ -1140,10 +1181,17 @@ export default function VecinalApp() {
               </form>
             )}
             <section className="admin-panel">
-              <div className="panel-heading"><div><span>{neighbors.length} registros</span><h2>Directorio vecinal</h2></div><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR</button></div>
+              <div className="panel-heading"><div><span>{neighborSearch ? `${filteredNeighbors.length} de ${neighbors.length} registros` : `${neighbors.length} registros`}</span><h2>Directorio vecinal</h2></div><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR</button></div>
+              {!!duplicateLotGroups.length && <div className="duplicate-lot-warning" role="alert"><strong>Hay lotes repetidos de registros anteriores.</strong><span>Revise y corrija: {duplicateLotGroups.map((group) => group[0].lot).join(", ")}. El sistema ya no permitirá crear nuevos duplicados.</span></div>}
+              <div className="neighbor-search-bar">
+                <label htmlFor="neighbor-search"><span>Buscar vecino por nombre o lote</span><input id="neighbor-search" type="search" value={neighborSearch} onChange={(event) => setNeighborSearch(event.target.value)} placeholder="Ej. Mamani o 307" autoComplete="off" /></label>
+                {neighborSearch && <button type="button" onClick={() => setNeighborSearch("")}>Limpiar búsqueda</button>}
+                <small role="status" aria-live="polite">{neighborSearch ? `${filteredNeighbors.length} ${filteredNeighbors.length === 1 ? "resultado" : "resultados"}` : "Escriba parte del nombre o el número de lote"}</small>
+              </div>
               <div className="neighbor-cards">
-                {neighbors.map((neighbor) => <article className="neighbor-card" key={neighbor.id}><QrTile neighbor={neighbor} /><div><span className={`status-dot ${balanceOf(neighbor) ? "has-debt" : "clear"}`}>{balanceOf(neighbor) ? "Pendiente" : "Al día"}</span><h3>{neighbor.name}</h3><p>{neighbor.street} · Lote {neighbor.lot}</p><p>{neighbor.code}</p><div className="neighbor-actions"><button onClick={() => window.open(publicNeighborUrl(neighbor.token), "_blank", "noopener,noreferrer")}>Ver tarjeta</button><button onClick={() => { setEditingNeighborId(neighbor.id); setShowNeighborForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="delete-action" onClick={() => void deleteNeighbor(neighbor)}>Eliminar</button></div></div></article>)}
+                {filteredNeighbors.map((neighbor) => <article className="neighbor-card" key={neighbor.id}><QrTile neighbor={neighbor} /><div><span className={`status-dot ${balanceOf(neighbor) ? "has-debt" : "clear"}`}>{balanceOf(neighbor) ? "Pendiente" : "Al día"}</span><h3>{neighbor.name}</h3><p>{neighbor.street} · Lote {neighbor.lot}</p><p>{neighbor.code}</p><div className="neighbor-actions"><button onClick={() => window.open(publicNeighborUrl(neighbor.token), "_blank", "noopener,noreferrer")}>Ver tarjeta</button><button onClick={() => { setEditingNeighborId(neighbor.id); setShowNeighborForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="delete-action" onClick={() => void deleteNeighbor(neighbor)}>Eliminar</button></div></div></article>)}
                 {!neighbors.length && <div className="empty-state"><strong>Aún no hay vecinos.</strong><span>Pulse “Registrar vecino” para crear el primero y generar su QR.</span></div>}
+                {!!neighbors.length && !filteredNeighbors.length && <div className="empty-state"><strong>No se encontró ningún vecino.</strong><span>Revise el nombre o número de lote, o pulse “Limpiar búsqueda”.</span></div>}
               </div>
             </section>
           </div>

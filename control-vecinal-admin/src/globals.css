@@ -1085,6 +1085,26 @@ input, select, textarea { width: 100%; min-height: 46px; margin-top: 7px; border
 textarea { padding-top: 12px; resize: vertical; }
 input:focus, select:focus, textarea:focus { border-color: #6f9bcc; box-shadow: 0 0 0 3px rgba(49, 111, 176, 0.1); }
 
+.neighbor-search-bar {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  align-items: end;
+  gap: 10px 12px;
+  margin-top: 16px;
+  border: 1px solid #dce5ef;
+  border-radius: 16px;
+  padding: 14px;
+  background: #f8fafc;
+}
+.neighbor-search-bar label { color: #435168; font-size: 0.72rem; font-weight: 780; }
+.neighbor-search-bar label > span { display: block; }
+.neighbor-search-bar input { min-height: 48px; margin-top: 7px; background: white; }
+.neighbor-search-bar button { min-height: 48px; border: 0; border-radius: 12px; padding: 0 15px; color: var(--blue); background: var(--blue-soft); font-size: 0.7rem; font-weight: 780; white-space: nowrap; }
+.neighbor-search-bar small { grid-column: 1 / -1; color: var(--muted); font-size: 0.68rem; }
+.duplicate-lot-warning { display: grid; gap: 4px; margin-top: 16px; border: 1px solid #e7c36c; border-radius: 14px; padding: 12px 14px; color: #74531b; background: #fff8e7; }
+.duplicate-lot-warning strong { color: #674510; font-size: 0.76rem; }
+.duplicate-lot-warning span { font-size: 0.7rem; line-height: 1.45; }
+
 .neighbor-cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 16px; }
 .neighbor-card { display: grid; grid-template-columns: 118px 1fr; gap: 16px; border: 1px solid #e0e7ef; border-radius: 17px; padding: 14px; }
 .qr-image, .qr-loading { width: 118px; height: 118px; border: 1px solid #dce5ef; border-radius: 12px; object-fit: contain; }
@@ -1249,6 +1269,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .quick-actions, .summary-grid, .report-grid { grid-template-columns: 1fr 1fr; }
   .section-intro { align-items: flex-start; flex-direction: column; }
   .inline-form, .activity-form, .payment-form, .view-editor-form { grid-template-columns: 1fr; }
+  .neighbor-search-bar { grid-template-columns: 1fr; }
+  .neighbor-search-bar button { width: 100%; }
+  .neighbor-search-bar small { grid-column: 1; }
   .view-editor-tabs { grid-template-columns: 1fr; max-width: none; }
   .color-fields { grid-template-columns: 1fr; }
   .payment-form .full-field { grid-column: auto; }

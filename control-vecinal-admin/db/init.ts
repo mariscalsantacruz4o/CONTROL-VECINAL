@@ -86,6 +86,34 @@ async function initializeDatabase() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
     "CREATE INDEX IF NOT EXISTS idx_neighbors_active_name ON neighbors(active, name)",
+    `CREATE TRIGGER IF NOT EXISTS trg_neighbors_unique_lot_insert
+      BEFORE INSERT ON neighbors
+      WHEN trim(NEW.lot) <> ''
+        AND trim(NEW.lot) <> '—'
+        AND EXISTS (
+          SELECT 1 FROM neighbors
+          WHERE trim(lot) <> ''
+            AND trim(lot) <> '—'
+            AND upper(replace(trim(lot), ' ', '')) = upper(replace(trim(NEW.lot), ' ', ''))
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'LOT_DUPLICADO');
+      END`,
+    `CREATE TRIGGER IF NOT EXISTS trg_neighbors_unique_lot_update
+      BEFORE UPDATE OF lot ON neighbors
+      WHEN trim(NEW.lot) <> ''
+        AND trim(NEW.lot) <> '—'
+        AND upper(replace(trim(NEW.lot), ' ', '')) <> upper(replace(trim(OLD.lot), ' ', ''))
+        AND EXISTS (
+          SELECT 1 FROM neighbors
+          WHERE id <> OLD.id
+            AND trim(lot) <> ''
+            AND trim(lot) <> '—'
+            AND upper(replace(trim(lot), ' ', '')) = upper(replace(trim(NEW.lot), ' ', ''))
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'LOT_DUPLICADO');
+      END`,
     "CREATE INDEX IF NOT EXISTS idx_activities_date ON activities(date)",
     "CREATE INDEX IF NOT EXISTS idx_attendance_neighbor ON attendance_records(neighbor_id)",
     "CREATE INDEX IF NOT EXISTS idx_payments_neighbor_date ON payments(neighbor_id, date)",
