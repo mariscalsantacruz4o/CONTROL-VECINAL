@@ -43,13 +43,23 @@ type Payment = {
 type AdminSection = "resumen" | "vecinos" | "actividades" | "asistencia" | "pagos" | "vistas" | "avisos" | "reportes";
 type VisitorView = "inicio" | "sencillo" | "detallado";
 type AttendanceStatus = "Presente" | "Faltó" | "Justificado";
-type CardStatus = "done" | "pending" | "empty";
+type CardStatus = "done" | "pending" | "exempt" | "empty";
+type CardEntryDetail = {
+  activityId: number;
+  type: string;
+  title: string;
+  date: string;
+  amount: number;
+  charge: number;
+  status: AttendanceStatus | "Programada";
+};
 type CardRow = {
   label: string;
   kind: "attendance" | "contribution";
   values: CardStatus[];
   cellLabels: string[];
   details: string[];
+  entries: Array<CardEntryDetail | null>;
 };
 type ViewEditorMode = "tarjeta" | "apariencia";
 type ThemeSettings = {
@@ -178,6 +188,7 @@ const cardRows: CardRow[] = [
     values: Array(12).fill("empty") as CardStatus[],
     cellLabels: [...blankDetails],
     details: [...blankDetails],
+    entries: Array(12).fill(null),
   },
   {
     label: "Cuotas mensuales",
@@ -185,6 +196,7 @@ const cardRows: CardRow[] = [
     values: Array(12).fill("empty") as CardStatus[],
     cellLabels: [...blankDetails],
     details: [...blankDetails],
+    entries: Array(12).fill(null),
   },
   {
     label: "Cuotas extras",
@@ -192,6 +204,7 @@ const cardRows: CardRow[] = [
     values: Array(12).fill("empty") as CardStatus[],
     cellLabels: [...blankDetails],
     details: [...blankDetails],
+    entries: Array(12).fill(null),
   },
   {
     label: "Otros",
@@ -199,6 +212,7 @@ const cardRows: CardRow[] = [
     values: Array(12).fill("empty") as CardStatus[],
     cellLabels: [...blankDetails],
     details: [...blankDetails],
+    entries: Array(12).fill(null),
   },
   {
     label: "Trabajos",
@@ -206,6 +220,7 @@ const cardRows: CardRow[] = [
     values: Array(24).fill("empty") as CardStatus[],
     cellLabels: [...blankWorkDetails],
     details: [...blankWorkDetails],
+    entries: Array(24).fill(null),
   },
 ];
 
@@ -289,10 +304,23 @@ function balanceOf(neighbor: Neighbor) {
   return Math.max(0, neighbor.generated - neighbor.paid);
 }
 
-function shortCardLabel(type: string, title: string, amount: number) {
-  const normalized = type.toLocaleLowerCase("es");
-  if (normalized.includes("cuota") || normalized.includes("aporte")) return `${formatBs(amount)} Bs`;
-  return title.slice(0, 18);
+function shortCardLabel(title: string) {
+  return title.trim().slice(0, 18);
+}
+
+function cardStatusFromAttendance(status?: AttendanceStatus): CardStatus {
+  if (!status) return "empty";
+  if (status === "Faltó") return "pending";
+  if (status === "Justificado") return "exempt";
+  return "done";
+}
+
+function debtConceptForActivity(activity: Activity) {
+  if (activity.cardRowIndex === 1) return "Cuota mensual pendiente";
+  if (activity.cardRowIndex === 2) return "Cuota extra pendiente";
+  if (activity.cardRowIndex === 0) return "Asamblea pendiente";
+  if (activity.cardRowIndex === 4) return "Trabajo pendiente";
+  return `${activity.type} pendiente`;
 }
 
 function emptyCardRows() {
@@ -301,6 +329,7 @@ function emptyCardRows() {
     values: Array(row.values.length).fill("empty") as CardStatus[],
     cellLabels: Array(row.values.length).fill("") as string[],
     details: Array(row.values.length).fill("") as string[],
+    entries: Array(row.values.length).fill(null) as Array<CardEntryDetail | null>,
   }));
 }
 
@@ -311,12 +340,18 @@ function cardRowsFromRecords(activities: Activity[], attendance: AttendanceRecor
     const row = rows[activity.cardRowIndex];
     if (!row || activity.cardSlotIndex < 0 || activity.cardSlotIndex >= row.values.length) continue;
     const record = attendanceByActivity.get(activity.id);
-    row.values[activity.cardSlotIndex] = !record ? "empty" : record.status === "Faltó" ? "pending" : "done";
-    row.cellLabels[activity.cardSlotIndex] = shortCardLabel(activity.type, activity.title, activity.fine);
-    // La ventana ya muestra el resultado y el monto en campos separados.
-    // Aquí dejamos solamente el detalle y la fecha para evitar repetir o
-    // destacar innecesariamente una falta y su multa.
+    row.values[activity.cardSlotIndex] = cardStatusFromAttendance(record?.status);
+    row.cellLabels[activity.cardSlotIndex] = shortCardLabel(activity.title);
     row.details[activity.cardSlotIndex] = `${activity.title} · ${formatDate(activity.date)}`;
+    row.entries[activity.cardSlotIndex] = {
+      activityId: activity.id,
+      type: activity.type,
+      title: activity.title,
+      date: activity.date,
+      amount: activity.fine,
+      charge: record?.charge ?? 0,
+      status: record?.status ?? "Programada",
+    };
   }
   return rows;
 }
@@ -416,6 +451,7 @@ export default function VecinalApp() {
   const selectedCardDetail = selectedCardRow.details[selectedCardMonth] ?? "";
   const selectedCellRow = selectedCardCell ? cardData[selectedCardCell.rowIndex] : null;
   const selectedCellStatus = selectedCardCell && selectedCellRow ? selectedCellRow.values[selectedCardCell.monthIndex] : "empty";
+  const selectedCellEntry = selectedCardCell && selectedCellRow ? selectedCellRow.entries[selectedCardCell.monthIndex] : null;
   const whatsappMessage = `Hola, quisiera consultar mi estado vecinal. Soy ${demoNeighbor.name}, lote ${demoNeighbor.lot}.`;
   const whatsappNumber = notice.whatsapp.replace(/\D/g, "");
   const whatsappHref = whatsappNumber
@@ -507,7 +543,7 @@ export default function VecinalApp() {
         return [{
           neighborId: record.neighborId,
           activityId: record.activityId,
-          concept: `Multa · ${activity.type}`,
+          concept: debtConceptForActivity(activity),
           detail: activity.title,
           date: formatDate(activity.date),
           amount: record.charge,
@@ -531,10 +567,11 @@ export default function VecinalApp() {
   useEffect(() => {
     const token = new URLSearchParams(window.location.search).get("token");
     if (!token) {
-      setPublicLoadStatus("idle");
-      return;
+      const timer = window.setTimeout(() => setPublicLoadStatus("idle"), 0);
+      return () => window.clearTimeout(timer);
     }
     let active = true;
+    /* eslint-disable react-hooks/set-state-in-effect -- reinicia la tarjeta al cambiar el token del QR */
     setNeighbors([]);
     setActivities([]);
     setPayments([]);
@@ -544,6 +581,7 @@ export default function VecinalApp() {
     setNoticeDismissed(false);
     setPublicLoadStatus("loading");
     setPublicLoadError("");
+    /* eslint-enable react-hooks/set-state-in-effect */
 
     async function loadPublicCard() {
       try {
@@ -598,7 +636,7 @@ export default function VecinalApp() {
           if (!record.charge) return [];
           const activity = publicActivities.find((item) => item.id === record.activityId);
           if (!activity) return [];
-          return [{ neighborId: publicNeighbor.id, activityId: activity.id, concept: `Multa · ${activity.type}`, detail: activity.title, date: formatDate(activity.date), amount: record.charge, category: debtCategoryFromRowIndex(activity.cardRowIndex), sortDate: activity.date }];
+          return [{ neighborId: publicNeighbor.id, activityId: activity.id, concept: debtConceptForActivity(activity), detail: activity.title, date: formatDate(activity.date), amount: record.charge, category: debtCategoryFromRowIndex(activity.cardRowIndex), sortDate: activity.date }];
         }));
         applyNotice(state.notice);
         applySettings(state.settings);
@@ -1051,12 +1089,13 @@ export default function VecinalApp() {
                     {row.values.map((status, monthIndex) => {
                       const month = fullMonthNames[monthIndex] ?? `Cuadro ${monthIndex + 1}`;
                       const cellLabel = row.cellLabels[monthIndex] ?? "";
-                      const hasEntry = Boolean(cellLabel || row.details[monthIndex]);
-                      const statusText = status === "done" ? (row.kind === "attendance" ? "Asistió" : "Pagó") : status === "pending" ? (row.kind === "attendance" ? "Faltó" : "Pendiente") : hasEntry ? "Programado" : "Sin actividad";
+                      const hasEntry = Boolean(row.entries[monthIndex] || cellLabel || row.details[monthIndex]);
+                      const statusText = status === "done" ? (row.kind === "attendance" ? "Cumplió" : "Pagó") : status === "pending" ? "Pendiente" : status === "exempt" ? (row.kind === "attendance" ? "Justificado" : "Exento") : hasEntry ? "Por registrar" : "Sin actividad";
+                      const locationText = rowIndex === 0 ? `${row.label}, ${month}` : row.label;
                       return (
-                        <button type="button" className={`summary-month ${status} ${hasEntry ? "has-entry" : ""}`} key={`${row.label}-${month}`} aria-label={`${row.label}, ${month}: ${statusText}${hasEntry || status !== "empty" ? ". Toque para ver el detalle" : ""}`} onClick={() => (hasEntry || status !== "empty") && setSelectedCardCell({ rowIndex, monthIndex })} disabled={!hasEntry && status === "empty"}>
+                        <button type="button" className={`summary-month ${status} ${hasEntry ? "has-entry" : ""}`} key={`${row.label}-${monthIndex}`} aria-label={`${locationText}: ${statusText}${hasEntry || status !== "empty" ? ". Toque para ver el detalle" : ""}`} onClick={() => (hasEntry || status !== "empty") && setSelectedCardCell({ rowIndex, monthIndex })} disabled={!hasEntry && status === "empty"}>
                           {rowIndex === 0 && <span>{month.slice(0, 3)}</span>}
-                          <b>{status === "done" ? "✓" : status === "pending" ? "×" : hasEntry ? "•" : ""}</b>
+                          <b>{status === "done" ? "✓" : status === "pending" ? "×" : status === "exempt" ? "—" : hasEntry ? "•" : ""}</b>
                           {cellLabel && <small>{cellLabel}</small>}
                         </button>
                       );
@@ -1069,7 +1108,7 @@ export default function VecinalApp() {
           </div>
           </section>
           {notice.active && !noticeDismissed && <NoticeAnnouncement notice={notice} onClose={() => setNoticeDismissed(true)} />}
-          {selectedCardCell && selectedCellRow && <CardDetailDialog row={selectedCellRow} monthIndex={selectedCardCell.monthIndex} status={selectedCellStatus} onClose={() => setSelectedCardCell(null)} />}
+          {selectedCardCell && selectedCellRow && <CardDetailDialog row={selectedCellRow} rowIndex={selectedCardCell.rowIndex} slotIndex={selectedCardCell.monthIndex} status={selectedCellStatus} entry={selectedCellEntry} onClose={() => setSelectedCardCell(null)} />}
           {showDebtDetail && <DebtDetailDialog items={visitorOutstandingDebtItems} onClose={() => setShowDebtDetail(false)} />}
         </main>
       );
@@ -1106,8 +1145,8 @@ export default function VecinalApp() {
                     <tr key={row.label}>
                       <th>{row.label}</th>
                       {row.values.map((status, index) => (
-                        <td key={`${row.label}-${monthNames[index]}`} className={`card-status ${status}`} aria-label={`${row.label}, ${monthNames[index]}: ${status === "done" ? "cumplido" : status === "pending" ? "no cumplido" : "sin actividad"}`}>
-                          {status === "empty" ? <i>—</i> : <button type="button" onClick={() => setSelectedCardCell({ rowIndex: cardData.indexOf(row), monthIndex: index })}>{status === "done" ? "✓" : "×"}</button>}
+                        <td key={`${row.label}-${index}`} className={`card-status ${status}`} aria-label={`${row.label}, cuadro ${index + 1}: ${status === "done" ? "cumplido" : status === "pending" ? "pendiente" : status === "exempt" ? "exento o justificado" : "sin actividad"}`}>
+                          {status === "empty" ? <i>—</i> : <button type="button" onClick={() => setSelectedCardCell({ rowIndex: cardData.indexOf(row), monthIndex: index })}>{status === "done" ? "✓" : status === "pending" ? "×" : "—"}</button>}
                         </td>
                       ))}
                     </tr>
@@ -1160,7 +1199,7 @@ export default function VecinalApp() {
             <DebtBreakdown total={demoBalance} items={visitorDebtItems} compact />
             <a className="whatsapp-button" href={whatsappHref} target="_blank" rel="noreferrer"><span aria-hidden="true">WA</span> Consultar por WhatsApp →</a>
           </section>
-          {selectedCardCell && selectedCellRow && <CardDetailDialog row={selectedCellRow} monthIndex={selectedCardCell.monthIndex} status={selectedCellStatus} onClose={() => setSelectedCardCell(null)} />}
+          {selectedCardCell && selectedCellRow && <CardDetailDialog row={selectedCellRow} rowIndex={selectedCardCell.rowIndex} slotIndex={selectedCardCell.monthIndex} status={selectedCellStatus} entry={selectedCellEntry} onClose={() => setSelectedCardCell(null)} />}
         </main>
       );
     }
@@ -1391,20 +1430,32 @@ function NextEventBanner({ notice, wide = false }: { notice: Notice; wide?: bool
   </article>;
 }
 
-function CardDetailDialog({ row, monthIndex, status, onClose }: { row: CardRow; monthIndex: number; status: CardStatus; onClose: () => void }) {
-  const statusLabel = status === "done" ? (row.kind === "attendance" ? "Asistió" : "Pagado") : status === "pending" ? (row.kind === "attendance" ? "No asistió" : "Pendiente de pago") : "Actividad programada";
-  const dialogTitle = status === "empty" ? "Actividad programada" : row.kind === "attendance" ? "Registro de asistencia" : "Registro de pago";
-  const detail = row.details[monthIndex] || "No hay una observación adicional registrada.";
-  const slotName = fullMonthNames[monthIndex] ?? `Cuadro ${monthIndex + 1}`;
-  const fine = detail.match(/Bs\s*(\d+(?:[.,]\d+)?)/i)?.[1];
+function CardDetailDialog({ row, rowIndex, slotIndex, status, entry, onClose }: { row: CardRow; rowIndex: number; slotIndex: number; status: CardStatus; entry: CardEntryDetail | null; onClose: () => void }) {
+  const isContribution = row.kind === "contribution";
+  const statusLabel = entry?.status === "Programada" || !entry
+    ? "Por registrar"
+    : entry.status === "Justificado"
+      ? isContribution ? "Exento" : "Justificado"
+      : entry.status === "Faltó"
+        ? isContribution ? "Pendiente de pago" : "Pendiente de regularización"
+        : isContribution ? "Pagó" : rowIndex === 4 ? "Realizó la actividad" : "Asistió";
+  const locationLabel = rowIndex === 0 ? `${row.label} · ${fullMonthNames[slotIndex] ?? ""}` : row.label;
+  const amount = isContribution ? (entry?.amount ?? 0) : (entry?.charge ?? 0);
+  const amountLabel = isContribution
+    ? status === "done" ? "Monto pagado" : status === "pending" ? "Monto pendiente" : "Monto de referencia"
+    : "Monto registrado";
   return <div className="cell-dialog-backdrop">
     <section className="cell-dialog" role="dialog" aria-modal="true" aria-labelledby="cell-dialog-title">
       <button type="button" className="dialog-close" onClick={onClose} aria-label="Cerrar detalle">×</button>
-      <div className={`dialog-status ${status}`} aria-hidden="true">{status === "done" ? "✓" : status === "pending" ? "×" : "•"}</div>
-      <span>{row.label} · {slotName}</span>
-      <h2 id="cell-dialog-title">{dialogTitle}</h2>
-      <p>{detail}</p>
-      <dl><div><dt>Resultado</dt><dd>{statusLabel}</dd></div>{fine && <div><dt>Monto registrado</dt><dd>Bs {fine}</dd></div>}</dl>
+      <div className={`dialog-status ${status}`} aria-hidden="true">{status === "done" ? "✓" : status === "pending" ? "×" : status === "exempt" ? "—" : "•"}</div>
+      <span>{locationLabel}</span>
+      <h2 id="cell-dialog-title">{entry?.title || "Registro sin detalle"}</h2>
+      {entry && <p>{rowIndex === 3 ? entry.type : isContribution ? "Estado de la cuota registrada" : "Estado de la actividad registrada"}</p>}
+      <dl>
+        <div><dt>Resultado</dt><dd>{statusLabel}</dd></div>
+        {entry && amount > 0 && <div><dt>{amountLabel}</dt><dd>Bs {formatBs(amount)}</dd></div>}
+        {entry && <div><dt>Fecha del registro</dt><dd>{formatDate(entry.date)}</dd></div>}
+      </dl>
       <button type="button" className="dialog-understood" onClick={onClose}>Entendido</button>
     </section>
   </div>;
@@ -1447,6 +1498,7 @@ function NoticeAnnouncement({ notice, onClose }: { notice: Notice; onClose: () =
   return <div className="notice-popup-backdrop">
     <section className="notice-popup" role="dialog" aria-modal="true" aria-labelledby="notice-popup-title">
       <button type="button" className="notice-popup-close" onClick={onClose} aria-label="Cerrar aviso">×</button>
+      {/* eslint-disable-next-line @next/next/no-img-element -- la imagen puede ser una URL de datos guardada en D1 */}
       {notice.image ? <img className="notice-popup-image" src={notice.image} alt={`Aviso: ${notice.title}`} /> : <div className="notice-popup-placeholder" aria-hidden="true"><span>U.V. 4-O</span><strong>{notice.eventType || "Aviso vecinal"}</strong></div>}
       <div className="notice-popup-content">
         <span>Aviso vecinal · {notice.eventType}</span>

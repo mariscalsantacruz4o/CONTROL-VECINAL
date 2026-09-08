@@ -595,6 +595,7 @@ button { cursor: pointer; }
 .summary-month:active:not(:disabled) { transform: scale(.97); }
 .summary-month.done { color: #08713f; background: #edf9f1; box-shadow: inset 0 0 0 2px #168047; }
 .summary-month.pending { color: #c51f2e; background: #fff0f1; box-shadow: inset 0 0 0 2px #df2636; }
+.summary-month.exempt { color: #856414; background: #fff8df; box-shadow: inset 0 0 0 2px #d8b648; }
 .summary-month.empty { color: #67717c; background: #ffffff; }
 .summary-month.empty.has-entry { color: var(--blue); background: #f4f8fc; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--blue) 45%, white); cursor: pointer; }
 .summary-month.empty.has-entry > b { color: var(--blue); }
@@ -680,6 +681,7 @@ button { cursor: pointer; }
 .card-status { padding: 0; }
 .card-status.done { color: var(--green); background: color-mix(in srgb, var(--green) 12%, white); }
 .card-status.pending { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, white); }
+.card-status.exempt { color: #8b6917; background: #fff8df; }
 .card-status.empty { color: #707a83; background: #f0f0eb; }
 .card-status button, .card-status i { display: grid; width: 100%; height: 66px; place-items: center; border: 0; border-radius: 0; color: inherit; background: transparent; font-size: 2rem; font-style: normal; font-weight: 950; }
 .card-status button { cursor: pointer; }
@@ -972,6 +974,7 @@ button { cursor: pointer; }
 .dialog-status { display: grid; width: 64px; height: 64px; place-items: center; border-radius: 12px; font-size: 2.4rem; font-weight: 950; }
 .dialog-status.done { border: 3px solid var(--green); color: var(--green); background: color-mix(in srgb, var(--green) 12%, white); }
 .dialog-status.pending { border: 3px solid var(--danger); color: var(--danger); background: color-mix(in srgb, var(--danger) 11%, white); }
+.dialog-status.exempt { border: 3px solid #c3a338; color: #856414; background: #fff8df; }
 .dialog-status.empty { border: 3px solid var(--blue); color: var(--blue); background: color-mix(in srgb, var(--blue) 10%, white); }
 .cell-dialog > span { display: block; margin-top: 17px; color: var(--blue); font-size: .65rem; font-weight: 900; text-transform: uppercase; letter-spacing: .08em; }
 .cell-dialog h2 { margin: 6px 0; color: var(--navy); font-size: 1.45rem; }

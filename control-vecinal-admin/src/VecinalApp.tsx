@@ -27,7 +27,7 @@ type Activity = {
   cardSlotIndex: number;
 };
 
-type DebtItem = { concept: string; detail: string; date: string; amount: number };
+type DebtItem = { concept: string; detail: string; date: string; amount: number; category?: ActivityCategoryId; sortDate?: string };
 type ActivityCharge = DebtItem & { neighborId: number; activityId: number };
 
 type Payment = {
@@ -43,6 +43,7 @@ type AdminSection = "resumen" | "vecinos" | "actividades" | "asistencia" | "pago
 type VisitorView = "inicio" | "sencillo" | "detallado";
 type AttendanceStatus = "Presente" | "Faltó" | "Justificado";
 type CardStatus = "done" | "pending" | "empty";
+type ActivityCategoryId = "asambleas" | "cuotas-mensuales" | "cuotas-extras" | "otros" | "trabajos";
 type CardRow = {
   label: string;
   kind: "attendance" | "contribution";
@@ -117,25 +118,6 @@ type AdminState = {
   };
 };
 
-type PublicNeighborState = {
-  neighbor: Pick<Neighbor, "id" | "code" | "name" | "street" | "lot">;
-  cardEntries: Array<{
-    id: number;
-    type: string;
-    title: string;
-    date: string;
-    amount: number;
-    status: AttendanceStatus | "Programada";
-    charge: number;
-    cardRowIndex: number;
-    cardSlotIndex: number;
-  }>;
-  payments: Array<Omit<Payment, "neighborId">>;
-  totals: { generated: number; paid: number; balance: number };
-  notice: AdminState["notice"];
-  settings: AdminState["settings"];
-};
-
 const defaultTheme: ThemeSettings = {
   primary: "#102a52",
   secondary: "#1d4e89",
@@ -153,7 +135,19 @@ const defaultViewLabels: ViewLabels = {
   coverSubtitle: "Tu tarjeta vecinal siempre disponible y fácil de entender.",
 };
 
-const standardActivityTypes = ["Asamblea", "Trabajo", "Marcha / desfile", "Cuota mensual", "Cuota extra"];
+const activityCategories: Array<{
+  id: ActivityCategoryId;
+  label: string;
+  rowIndex: number;
+  defaultType: string;
+  kind: "attendance" | "contribution";
+}> = [
+  { id: "asambleas", label: "Asambleas", rowIndex: 0, defaultType: "Asamblea", kind: "attendance" },
+  { id: "cuotas-mensuales", label: "Cuotas mensuales", rowIndex: 1, defaultType: "Cuota mensual", kind: "contribution" },
+  { id: "cuotas-extras", label: "Cuotas extras", rowIndex: 2, defaultType: "Cuota extra", kind: "contribution" },
+  { id: "otros", label: "Otros", rowIndex: 3, defaultType: "Marcha / desfile", kind: "attendance" },
+  { id: "trabajos", label: "Trabajos", rowIndex: 4, defaultType: "Trabajo", kind: "attendance" },
+];
 
 const monthNames = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 const fullMonthNames = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
@@ -201,7 +195,7 @@ const navItems: Array<{ id: AdminSection; label: string; icon: string }> = [
   { id: "resumen", label: "Inicio", icon: "⌂" },
   { id: "vecinos", label: "Vecinos y QR", icon: "◎" },
   { id: "actividades", label: "Actividades y cuotas", icon: "◇" },
-  { id: "asistencia", label: "Asistencia", icon: "✓" },
+  { id: "asistencia", label: "Control por vecino", icon: "✓" },
   { id: "pagos", label: "Pagos", icon: "Bs" },
   { id: "vistas", label: "Vistas del vecino", icon: "✎" },
   { id: "avisos", label: "Avisos", icon: "!" },
@@ -210,6 +204,53 @@ const navItems: Array<{ id: AdminSection; label: string; icon: string }> = [
 
 function formatBs(value: number) {
   return new Intl.NumberFormat("es-BO", { maximumFractionDigits: 2 }).format(value);
+}
+
+function csvCell(value: string | number) {
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function activityCategoryFromRowIndex(rowIndex: number) {
+  return activityCategories.find((category) => category.rowIndex === rowIndex) ?? activityCategories[3];
+}
+
+function activityCategoryById(id: string) {
+  return activityCategories.find((category) => category.id === id) ?? activityCategories[0];
+}
+
+function isContributionActivity(activity?: Activity | null) {
+  return activity?.cardRowIndex === 1 || activity?.cardRowIndex === 2;
+}
+
+function debtConceptForActivity(activity: Activity) {
+  if (activity.cardRowIndex === 1) return "Cuota mensual pendiente";
+  if (activity.cardRowIndex === 2) return "Cuota extra pendiente";
+  if (activity.cardRowIndex === 0) return "Asamblea pendiente";
+  if (activity.cardRowIndex === 4) return "Trabajo pendiente";
+  return `${activity.type} pendiente`;
+}
+
+function suggestedCategoryForActivity(activity: Activity) {
+  if (activity.cardRowIndex !== 3) return null;
+  const value = searchableText(`${activity.type} ${activity.title}`);
+  if (value.includes("asamblea") || value.includes("reunion")) return activityCategoryById("asambleas");
+  if (value.includes("mensualidad") || value.includes("cuota mensual")) return activityCategoryById("cuotas-mensuales");
+  if (value.includes("cuota") || value.includes("aporte") || value.includes("pago")) return activityCategoryById("cuotas-extras");
+  if (value.includes("trabajo") || value.includes("limpieza")) return activityCategoryById("trabajos");
+  return null;
+}
+
+function outstandingDebtItems(items: DebtItem[], paidAmount: number) {
+  let paymentAvailable = Math.max(0, paidAmount);
+  return [...items]
+    .sort((first, second) => (first.sortDate ?? "").localeCompare(second.sortDate ?? ""))
+    .flatMap<DebtItem>((item) => {
+      const applied = Math.min(item.amount, paymentAvailable);
+      paymentAvailable -= applied;
+      const pendingAmount = Math.max(0, item.amount - applied);
+      return pendingAmount > 0 ? [{ ...item, amount: pendingAmount }] : [];
+    });
 }
 
 function searchableText(value: string) {
@@ -367,6 +408,7 @@ export default function VecinalApp() {
   const [editingNeighborId, setEditingNeighborId] = useState<number | null>(null);
   const [showActivityForm, setShowActivityForm] = useState(false);
   const [editingActivityId, setEditingActivityId] = useState<number | null>(null);
+  const [activityFormCategory, setActivityFormCategory] = useState<ActivityCategoryId>("asambleas");
   const [notice, setNotice] = useState<Notice>({
     title: "",
     body: "",
@@ -410,9 +452,32 @@ export default function VecinalApp() {
     }
     return [...groups.values()].filter((group) => group.length > 1);
   }, [neighbors]);
-  const editingActivityType = !editingActivity ? "Asamblea" : standardActivityTypes.includes(editingActivity.type) ? editingActivity.type : "Otro personalizado";
-  const editingCustomType = editingActivity && !standardActivityTypes.includes(editingActivity.type) ? editingActivity.type : "";
+  const activitiesToReview = useMemo(() => activities.flatMap((activity) => {
+    const suggestion = suggestedCategoryForActivity(activity);
+    return suggestion ? [{ activity, suggestion }] : [];
+  }), [activities]);
+  const editingCustomType = editingActivity?.cardRowIndex === 3 ? editingActivity.type : "";
   const selectedAttendance = attendanceByActivity[selectedActivity] ?? {};
+  const selectedActivityCategory = activityCategoryFromRowIndex(selectedActivityData?.cardRowIndex ?? 0);
+  const selectedActivityIsContribution = selectedActivityCategory.kind === "contribution";
+  const selectedStatusOptions: Array<{ value: AttendanceStatus; label: string }> = selectedActivityIsContribution
+    ? [
+        { value: "Presente", label: "✓ Pagó" },
+        { value: "Faltó", label: "× Pendiente" },
+        { value: "Justificado", label: "— Exento" },
+      ]
+    : selectedActivityData?.cardRowIndex === 4
+      ? [
+          { value: "Presente", label: "✓ Realizó" },
+          { value: "Faltó", label: "× Pendiente" },
+          { value: "Justificado", label: "— Justificado" },
+        ]
+      : [
+          { value: "Presente", label: "✓ Asistió" },
+          { value: "Faltó", label: "× Pendiente" },
+          { value: "Justificado", label: "— Justificado" },
+        ];
+  const selectedPendingCount = Object.values(selectedAttendance).filter((status) => status === "Faltó").length;
   const selectedCardRow = cardData[selectedCardCategory] ?? cardData[0] ?? cardRows[0];
   const selectedCardStatus = selectedCardRow.values[selectedCardMonth] ?? "empty";
   const selectedCardLabel = selectedCardRow.cellLabels[selectedCardMonth] ?? "";
@@ -494,7 +559,8 @@ export default function VecinalApp() {
       setPayments(state.payments);
       const recordsByActivity: Record<number, Record<number, AttendanceStatus>> = {};
       for (const activity of state.activities) {
-        recordsByActivity[activity.id] = Object.fromEntries(state.neighbors.map((neighbor) => [neighbor.id, "Presente" as AttendanceStatus]));
+        const defaultStatus: AttendanceStatus = isContributionActivity(activity) ? "Faltó" : "Presente";
+        recordsByActivity[activity.id] = Object.fromEntries(state.neighbors.map((neighbor) => [neighbor.id, defaultStatus]));
       }
       for (const record of state.attendance) {
         recordsByActivity[record.activityId] = { ...(recordsByActivity[record.activityId] ?? {}), [record.neighborId]: record.status };
@@ -507,10 +573,12 @@ export default function VecinalApp() {
         return [{
           neighborId: record.neighborId,
           activityId: record.activityId,
-          concept: `Multa · ${activity.type}`,
+          concept: debtConceptForActivity(activity),
           detail: activity.title,
           date: formatDate(activity.date),
           amount: record.charge,
+          category: activityCategoryFromRowIndex(activity.cardRowIndex).id,
+          sortDate: activity.date,
         }];
       }));
       const firstActivityId = state.activities[0]?.id ?? 0;
@@ -541,10 +609,6 @@ export default function VecinalApp() {
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [selectedCardCell]);
-
-  useEffect(() => {
-    setArea("admin");
-  }, []);
 
   useEffect(() => {
     if (area !== "admin") return;
@@ -682,21 +746,27 @@ export default function VecinalApp() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const title = String(form.get("title") ?? "").trim();
-    const customType = String(form.get("customType") ?? "").trim();
     if (!title) return;
-    const type = customType || String(form.get("type") ?? "Asamblea");
+    const category = activityCategoryById(String(form.get("category") ?? activityFormCategory));
+    const customType = String(form.get("customType") ?? "").trim();
+    const type = category.id === "otros" ? customType : category.defaultType;
+    if (!type) {
+      notify("Escriba el tipo de registro que irá en Otros");
+      return;
+    }
     const date = String(form.get("date") ?? "2026-08-23");
     const fine = Math.max(0, Number(form.get("fine") ?? 0));
     try {
       const result = await apiRequest<{ activity: Activity }>("/api/admin/activities", {
         method: editingActivity ? "PATCH" : "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: editingActivity?.id, type, title, date, fine }),
+        body: JSON.stringify({ id: editingActivity?.id, category: category.id, type, title, date, fine }),
       });
       await loadAdminState(false);
       setSelectedActivity(result.activity.id);
       setEditingActivityId(null);
       setShowActivityForm(false);
+      setActivityFormCategory("asambleas");
       event.currentTarget.reset();
       notify(editingActivity ? "Actividad corregida y deuda recalculada" : "Actividad creada y añadida a la tarjeta");
     } catch (error) {
@@ -773,6 +843,7 @@ export default function VecinalApp() {
       return;
     }
     const currentRecords = attendanceByActivity[selectedActivity] ?? {};
+    const defaultStatus: AttendanceStatus = isContributionActivity(selectedActivityData) ? "Faltó" : "Presente";
     try {
       const result = await apiRequest<{ absentCount: number; generated: number }>("/api/admin/attendance", {
         method: "PUT",
@@ -781,13 +852,19 @@ export default function VecinalApp() {
           activityId: selectedActivity,
           records: neighbors.filter((neighbor) => neighbor.active).map((neighbor) => ({
             neighborId: neighbor.id,
-            status: currentRecords[neighbor.id] ?? "Presente",
+            status: currentRecords[neighbor.id] ?? defaultStatus,
             note: "",
           })),
         }),
       });
       await loadAdminState(false);
-      notify(result.absentCount ? `${result.absentCount} falta(s) guardada(s) · deuda Bs ${formatBs(result.generated)}` : "Asistencia guardada sin faltas");
+      notify(selectedActivityIsContribution
+        ? result.absentCount
+          ? `${result.absentCount} cuota(s) pendiente(s) · Bs ${formatBs(result.generated)}`
+          : "Estado de cuotas guardado sin pendientes"
+        : result.absentCount
+          ? `${result.absentCount} registro(s) pendiente(s) · deuda Bs ${formatBs(result.generated)}`
+          : "Control guardado sin pendientes");
     } catch (error) {
       notify(error instanceof Error ? error.message : "No se pudo guardar la asistencia");
     }
@@ -858,9 +935,21 @@ export default function VecinalApp() {
   }
 
   function downloadDebtorsCsv() {
-    const lines = ["Codigo,Nombre,Lote,Saldo"];
+    const lines = ["Codigo,Nombre,Lote,Asambleas,Cuotas mensuales,Cuotas extras,Otros,Trabajos,Saldo total"];
     neighbors.filter((neighbor) => balanceOf(neighbor) > 0).forEach((neighbor) => {
-      lines.push(`${neighbor.code},"${neighbor.name}",${neighbor.lot},${balanceOf(neighbor)}`);
+      const pending = outstandingDebtItems(activityCharges.filter((charge) => charge.neighborId === neighbor.id), neighbor.paid);
+      const subtotal = (category: ActivityCategoryId) => pending.filter((item) => item.category === category).reduce((sum, item) => sum + item.amount, 0);
+      lines.push([
+        neighbor.code,
+        neighbor.name,
+        neighbor.lot,
+        subtotal("asambleas"),
+        subtotal("cuotas-mensuales"),
+        subtotal("cuotas-extras"),
+        subtotal("otros"),
+        subtotal("trabajos"),
+        balanceOf(neighbor),
+      ].map(csvCell).join(","));
     });
     const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
@@ -896,7 +985,9 @@ export default function VecinalApp() {
     y += 7;
     doc.setFont("helvetica", "normal");
     for (const activity of monthlyActivities) {
-      doc.text(`${formatDate(activity.date)} · ${activity.type} · ${activity.title} · Bs ${formatBs(activity.fine)}`, 20, y, { maxWidth: 175 });
+      const category = activityCategoryFromRowIndex(activity.cardRowIndex);
+      const typeDetail = category.id === "otros" ? ` · ${activity.type}` : "";
+      doc.text(`${formatDate(activity.date)} · ${category.label}${typeDetail} · ${activity.title} · Bs ${formatBs(activity.fine)}`, 20, y, { maxWidth: 175 });
       y += 7;
       if (y > 245) { doc.addPage(); y = 22; }
     }
@@ -1198,19 +1289,48 @@ export default function VecinalApp() {
         )}
         {section === "actividades" && (
           <div className="admin-section">
-            <SectionIntro title="Actividades y cuotas" text="Al crear o corregir una actividad, la tarjeta se actualiza automáticamente. Puede modificar nombre, categoría, fecha y monto cuando detecte un error." action="Crear actividad" onAction={() => { setEditingActivityId(null); setShowActivityForm((value) => !value); }} />
-            {showActivityForm && <form className="inline-form activity-form" key={editingActivity?.id ?? "new-activity"} onSubmit={addActivity}><label>Tipo<select name="type" defaultValue={editingActivityType}><option>Asamblea</option><option>Trabajo</option><option>Marcha / desfile</option><option>Cuota mensual</option><option>Cuota extra</option><option>Otro personalizado</option></select></label><label>Tipo personalizado<input name="customType" defaultValue={editingCustomType} placeholder="Ej. Fumigación o seguridad" /></label><label className="wide-field">Nombre<input name="title" defaultValue={editingActivity?.title ?? ""} required placeholder="Ej. Limpieza de la plaza" /></label><label>Fecha<input name="date" type="date" defaultValue={editingActivity?.date ?? "2026-09-10"} required /></label><label>Monto o multa Bs<input name="fine" type="number" min="0" step="0.01" defaultValue={editingActivity?.fine ?? 50} required /></label><div className="activity-form-actions"><button type="submit" className="primary-action">{editingActivity ? "Guardar corrección" : "Guardar y mostrar"}</button>{editingActivity && <button type="button" className="cancel-action" onClick={() => { setEditingActivityId(null); setShowActivityForm(false); }}>Cancelar</button>}</div></form>}
-            <div className="activity-list">{activities.map((activity) => <article key={activity.id}><div className="activity-date"><strong>{new Date(`${activity.date}T00:00:00`).getUTCDate()}</strong><span>{new Intl.DateTimeFormat("es-BO", { month: "short", timeZone: "UTC" }).format(new Date(`${activity.date}T00:00:00Z`))}</span></div><div className="activity-main"><span>{activity.type} · {activity.code}</span><h3>{activity.title}</h3><p>Monto o multa configurada: <strong>Bs {formatBs(activity.fine)}</strong></p></div><span className={`activity-status ${activity.status === "Cerrada" ? "closed" : "scheduled"}`}>{activity.status}</span><div className="activity-actions"><button className="ghost-action" onClick={() => { setEditingActivityId(activity.id); setShowActivityForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="ghost-action" onClick={() => { setSelectedActivity(activity.id); setSection("asistencia"); }}>Asistencia →</button></div></article>)}{!activities.length && <div className="empty-state"><strong>Aún no hay actividades.</strong><span>Cree una asamblea, cuota, trabajo u otro evento para comenzar.</span></div>}</div>
+            <SectionIntro title="Actividades y cuotas" text="Elija primero el cuadro exacto donde debe aparecer. El nombre del concepto nunca cambiará esa ubicación." action="Crear registro" onAction={() => { setEditingActivityId(null); setActivityFormCategory("asambleas"); setShowActivityForm((value) => !value); }} />
+            {showActivityForm && <form className="inline-form activity-form" key={editingActivity?.id ?? "new-activity"} onSubmit={addActivity}>
+              <label>Ubicación en la tarjeta
+                <select name="category" value={activityFormCategory} onChange={(event) => setActivityFormCategory(event.target.value as ActivityCategoryId)}>
+                  {activityCategories.map((category) => <option value={category.id} key={category.id}>{category.label}</option>)}
+                </select>
+                <small>Este cuadro será respetado aunque cambie el nombre.</small>
+              </label>
+              {activityFormCategory === "otros" && <label>Tipo de registro
+                <input name="customType" defaultValue={editingCustomType || "Marcha / desfile"} required placeholder="Ej. Marcha, desfile o fumigación" />
+                <small>Solo se usa dentro del cuadro “Otros”.</small>
+              </label>}
+              <label className="wide-field">Concepto que verá el vecino
+                <input name="title" defaultValue={editingActivity?.title ?? ""} required placeholder={activityFormCategory === "cuotas-extras" ? "Ej. Aporte Casa Cultural" : "Ej. Limpieza de la plaza"} />
+              </label>
+              <label>Fecha del registro
+                <input name="date" type="date" defaultValue={editingActivity?.date ?? today} required />
+                <small>En cuotas extras y otros no se usa como nombre del cuadro.</small>
+              </label>
+              <label>{activityCategoryById(activityFormCategory).kind === "contribution" ? "Monto de la cuota Bs" : "Multa por incumplimiento Bs"}
+                <input name="fine" type="number" min="0" step="0.01" defaultValue={editingActivity?.fine ?? 50} required />
+              </label>
+              <div className="activity-form-actions"><button type="submit" className="primary-action">{editingActivity ? "Guardar corrección" : "Guardar registro"}</button>{editingActivity && <button type="button" className="cancel-action" onClick={() => { setEditingActivityId(null); setActivityFormCategory("asambleas"); setShowActivityForm(false); }}>Cancelar</button>}</div>
+            </form>}
+            <div className="category-location-note"><strong>Importante:</strong> si un registro antiguo está en el cuadro equivocado, pulse “Editar”, elija su ubicación correcta y guarde. No necesita volver a crearlo.</div>
+            {activitiesToReview.length > 0 && <div className="category-review-warning" role="status"><strong>Hay {activitiesToReview.length} registro(s) en “Otros” que conviene revisar.</strong><span>{activitiesToReview.map(({ activity, suggestion }) => `${activity.title} → ${suggestion.label}`).join(" · ")}</span><small>Pulse “Editar” en cada registro, confirme la ubicación sugerida y guarde.</small></div>}
+            <div className="activity-list">{activities.map((activity) => {
+              const category = activityCategoryFromRowIndex(activity.cardRowIndex);
+              const contribution = category.kind === "contribution";
+              return <article key={activity.id}><div className="activity-date"><strong>{new Date(`${activity.date}T00:00:00`).getUTCDate()}</strong><span>{new Intl.DateTimeFormat("es-BO", { month: "short", timeZone: "UTC" }).format(new Date(`${activity.date}T00:00:00Z`))}</span></div><div className="activity-main"><span>{category.label} · {activity.code}</span><h3>{activity.title}</h3><p>{contribution ? "Cuota configurada" : "Multa configurada"}: <strong>Bs {formatBs(activity.fine)}</strong>{category.id === "otros" && <> · {activity.type}</>}</p></div><span className={`activity-status ${activity.status === "Cerrada" ? "closed" : "scheduled"}`}>{activity.status}</span><div className="activity-actions"><button className="ghost-action" onClick={() => { const suggestion = suggestedCategoryForActivity(activity); setEditingActivityId(activity.id); setActivityFormCategory(suggestion?.id ?? category.id); setShowActivityForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="ghost-action" onClick={() => { setSelectedActivity(activity.id); setSection("asistencia"); }}>{contribution ? "Estado de pago →" : category.id === "trabajos" ? "Cumplimiento →" : "Asistencia →"}</button></div></article>;
+            })}{!activities.length && <div className="empty-state"><strong>Aún no hay actividades.</strong><span>Cree una asamblea, cuota, trabajo u otro evento para comenzar.</span></div>}</div>
           </div>
         )}
         {section === "asistencia" && (
           <div className="admin-section">
-            <SectionIntro title="Marcar asistencia" text="Todos aparecen presentes inicialmente. Cambie solamente a quienes faltaron o fueron justificados." />
+            <SectionIntro title={selectedActivityIsContribution ? "Registrar estado de pago" : "Registrar asistencia o cumplimiento"} text={selectedActivityIsContribution ? "Las cuotas comienzan como pendientes. Marque “Pagó” únicamente cuando el aporte esté confirmado, o “Exento” cuando corresponda." : "Revise cada vecino y marque si asistió, realizó la actividad o quedó pendiente."} />
             {!selectedActivityData ? <div className="empty-state"><strong>Primero debe crear una actividad.</strong><span>Después podrá marcar presentes, faltas o justificaciones.</span></div> : (
-              <section className="admin-panel attendance-panel"><div className="attendance-select"><label>Actividad<select value={selectedActivity} onChange={(event) => setSelectedActivity(Number(event.target.value))}>{activities.map((activity) => <option key={activity.id} value={activity.id}>{activity.code} · {activity.title}</option>)}</select></label><div><span>Multa configurada</span><strong>Bs {formatBs(selectedActivityData.fine)}</strong></div></div>
-                <div className="attendance-list">{neighbors.map((neighbor) => <article key={neighbor.id}><div className="avatar">{neighbor.name.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div className="attendance-name"><strong>{neighbor.name}</strong><span>Lote {neighbor.lot} · {neighbor.code}</span></div><div className="attendance-buttons">{(["Presente", "Faltó", "Justificado"] as AttendanceStatus[]).map((status) => <button key={status} className={(selectedAttendance[neighbor.id] ?? "Presente") === status ? `selected ${status.toLowerCase().replace("ó", "o")}` : ""} onClick={() => setAttendanceByActivity((current) => ({ ...current, [selectedActivity]: { ...(current[selectedActivity] ?? {}), [neighbor.id]: status } }))}>{status}</button>)}</div></article>)}</div>
+              <section className="admin-panel attendance-panel"><div className="attendance-select"><label>Registro<select value={selectedActivity} onChange={(event) => setSelectedActivity(Number(event.target.value))}>{activities.map((activity) => <option key={activity.id} value={activity.id}>{activityCategoryFromRowIndex(activity.cardRowIndex).label} · {activity.title}</option>)}</select></label><div><span>{selectedActivityIsContribution ? "Monto de la cuota" : "Multa configurada"}</span><strong>Bs {formatBs(selectedActivityData.fine)}</strong><small>{selectedActivityCategory.label}</small></div></div>
+                <div className="status-meaning-note"><strong>{selectedActivityIsContribution ? "Control de cuota" : "Control de actividad"}</strong><span>✓ confirmado · × pendiente · — exento o justificado</span></div>
+                <div className="attendance-list">{neighbors.map((neighbor) => { const currentStatus = selectedAttendance[neighbor.id] ?? (selectedActivityIsContribution ? "Faltó" : "Presente"); return <article key={neighbor.id}><div className="avatar">{neighbor.name.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div className="attendance-name"><strong>{neighbor.name}</strong><span>Lote {neighbor.lot} · {neighbor.code}</span></div><div className="attendance-buttons">{selectedStatusOptions.map((option) => <button type="button" key={option.value} className={currentStatus === option.value ? `selected ${option.value.toLowerCase().replace("ó", "o")}` : ""} onClick={() => setAttendanceByActivity((current) => ({ ...current, [selectedActivity]: { ...(current[selectedActivity] ?? {}), [neighbor.id]: option.value } }))}>{option.label}</button>)}</div></article>; })}</div>
                 {!neighbors.length && <div className="empty-state"><strong>No hay vecinos activos.</strong><span>Registre vecinos antes de guardar asistencia.</span></div>}
-                <div className="attendance-footer"><p><strong>{Object.values(selectedAttendance).filter((status) => status === "Faltó").length} faltas</strong> · Revise antes de confirmar.</p><button className="primary-action" disabled={!neighbors.length} onClick={() => void saveAttendance()}>Guardar asistencia y actualizar tarjeta</button></div>
+                <div className="attendance-footer"><p><strong>{selectedPendingCount} {selectedActivityIsContribution ? "cuota(s) pendiente(s)" : "registro(s) pendiente(s)"}</strong> · Revise antes de confirmar.</p><button className="primary-action" disabled={!neighbors.length} onClick={() => void saveAttendance()}>{selectedActivityIsContribution ? "Guardar pagos y actualizar tarjeta" : "Guardar control y actualizar tarjeta"}</button></div>
               </section>
             )}
           </div>

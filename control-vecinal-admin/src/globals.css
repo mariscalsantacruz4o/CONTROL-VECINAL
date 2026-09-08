@@ -1079,8 +1079,9 @@ button { cursor: pointer; }
 .inline-form { grid-template-columns: repeat(3, 1fr) auto; align-items: end; margin-bottom: 16px; }
 .neighbor-form { grid-template-columns: 1.25fr 1fr 0.55fr 0.75fr auto; }
 .neighbor-form .editor-help { grid-column: 1 / -1; margin-top: 0; }
-.activity-form { grid-template-columns: .75fr 1fr 1.35fr .75fr .6fr auto; }
+.activity-form { grid-template-columns: minmax(190px, .95fr) minmax(240px, 1.35fr) minmax(170px, .8fr) minmax(160px, .7fr) auto; }
 .inline-form label, .payment-form label, .notice-form label, .attendance-select label { color: #435168; font-size: 0.65rem; font-weight: 780; }
+.activity-form label > small { display: block; max-width: 250px; margin-top: 6px; color: var(--muted); font-size: .58rem; font-weight: 540; line-height: 1.35; }
 input, select, textarea { width: 100%; min-height: 46px; margin-top: 7px; border: 1px solid #d3deea; border-radius: 12px; padding: 0 12px; color: var(--ink); background: white; outline: none; }
 textarea { padding-top: 12px; resize: vertical; }
 input:focus, select:focus, textarea:focus { border-color: #6f9bcc; box-shadow: 0 0 0 3px rgba(49, 111, 176, 0.1); }
@@ -1119,6 +1120,11 @@ input:focus, select:focus, textarea:focus { border-color: #6f9bcc; box-shadow: 0
 .neighbor-actions .delete-action { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, white); }
 
 .activity-list { display: grid; gap: 11px; }
+.category-location-note { margin: -2px 0 15px; border-left: 4px solid var(--blue); border-radius: 0 12px 12px 0; padding: 10px 13px; color: #4c6178; background: #f4f8fc; font-size: .68rem; line-height: 1.45; }
+.category-location-note strong { color: var(--navy); }
+.category-review-warning { display: grid; gap: 4px; margin: -3px 0 15px; border: 1px solid #e6c46b; border-radius: 13px; padding: 11px 13px; color: #73551a; background: #fff8e5; font-size: .66rem; line-height: 1.4; }
+.category-review-warning strong { color: #65460f; font-size: .72rem; }
+.category-review-warning small { color: #806326; font-size: .6rem; }
 .activity-list article { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 16px; border: 1px solid #dce5ef; border-radius: 18px; padding: 15px; background: white; }
 .activity-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .activity-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
@@ -1137,6 +1143,7 @@ input:focus, select:focus, textarea:focus { border-color: #6f9bcc; box-shadow: 0
 .attendance-select { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 20px; border-bottom: 1px solid #e1e7ee; padding: 18px; background: #f8fafc; }
 .attendance-select > div { min-width: 130px; border-radius: 13px; padding: 10px 13px; background: #fff2cf; }
 .attendance-select > div span, .attendance-select > div strong { display: block; }
+.attendance-select > div small { display: block; margin-top: 4px; color: #8d6821; font-size: .56rem; font-weight: 750; }
 .attendance-select > div span { color: #8d6821; font-size: 0.59rem; text-transform: uppercase; }
 .attendance-select > div strong { margin-top: 3px; color: #6d4b0d; }
 .attendance-list article { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; border-bottom: 1px solid #e8edf2; padding: 14px 18px; }
@@ -1149,6 +1156,8 @@ input:focus, select:focus, textarea:focus { border-color: #6f9bcc; box-shadow: 0
 .attendance-buttons button.selected.presente { border-color: #8cd1b8; color: #0d7451; background: var(--green-soft); }
 .attendance-buttons button.selected.falto { border-color: #e9a9a9; color: #9d3f3f; background: #fff0f0; }
 .attendance-buttons button.selected.justificado { border-color: #e5c86f; color: #8d6617; background: #fff8df; }
+.status-meaning-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e8edf2; padding: 10px 18px; color: #65758a; background: #fff; font-size: .64rem; }
+.status-meaning-note strong { color: var(--navy); }
 .attendance-footer { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 16px 18px; background: #f8fafc; }
 .attendance-footer p { margin: 0; color: var(--muted); font-size: 0.7rem; }
 .attendance-footer p strong { color: var(--navy); }
@@ -1282,6 +1291,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .attendance-list article { grid-template-columns: auto 1fr; }
   .attendance-buttons { grid-column: 1 / -1; width: 100%; }
   .attendance-buttons button { flex: 1; }
+  .status-meaning-note { align-items: flex-start; flex-direction: column; }
 }
 
 @media (max-width: 480px) {
