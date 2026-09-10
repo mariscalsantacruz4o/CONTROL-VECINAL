@@ -1,7 +1,8 @@
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../../../../db";
+import { getD1, getDb } from "../../../../db";
 import { ensureDatabase } from "../../../../db/init";
 import { activities, attendanceRecords, auditLog } from "../../../../db/schema";
+import { allocatePayments } from "../../../../lib/payment-ledger";
 import { apiError, cleanText, moneyToCents, requireAdmin } from "../../_shared";
 
 const categoryRows = {
@@ -90,6 +91,21 @@ export async function PATCH(request: Request) {
       : chooseSlot(cardRowIndex, date, existing, id);
     if (cardSlotIndex < 0) return Response.json({ error: "No quedan cuadros disponibles en esa categoría" }, { status: 409 });
     const amountCents = moneyToCents(body.fine);
+    const d1 = getD1();
+    const [chargeRows, paymentRows] = await Promise.all([
+      d1.prepare("SELECT activity_id AS activityId, neighbor_id AS neighborId, charge_cents AS amount FROM attendance_records WHERE charge_cents > 0 ORDER BY activity_id").all<{ activityId: number; neighborId: number; amount: number }>(),
+      d1.prepare("SELECT neighbor_id AS neighborId, receipt, amount_cents AS amount FROM payments ORDER BY id").all<{ neighborId: number; receipt: string; amount: number }>(),
+    ]);
+    const neighborIds = new Set((chargeRows.results ?? []).filter((row) => row.activityId === id).map((row) => row.neighborId));
+    for (const neighborId of neighborIds) {
+      const allocation = allocatePayments(
+        (chargeRows.results ?? []).filter((row) => row.neighborId === neighborId).map((row) => ({ activityId: row.activityId, amount: row.amount, order: row.activityId })),
+        (paymentRows.results ?? []).filter((row) => row.neighborId === neighborId).map((row) => ({ receipt: row.receipt, amount: row.amount })),
+      ).find((item) => item.activityId === id);
+      if ((allocation?.paid ?? 0) > amountCents) {
+        return Response.json({ error: "El nuevo monto es menor que los pagos ya registrados para esta actividad" }, { status: 409 });
+      }
+    }
     const [activity] = await db.update(activities).set({ type, title, date, amountCents, cardRowIndex, cardSlotIndex, updatedAt: new Date().toISOString() }).where(eq(activities.id, id)).returning();
     if (!activity) return Response.json({ error: "Actividad no encontrada" }, { status: 404 });
     await db.update(attendanceRecords).set({ chargeCents: amountCents, updatedAt: new Date().toISOString() }).where(and(eq(attendanceRecords.activityId, id), eq(attendanceRecords.status, "Faltó")));

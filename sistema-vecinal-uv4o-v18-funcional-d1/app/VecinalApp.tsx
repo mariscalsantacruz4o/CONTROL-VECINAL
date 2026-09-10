@@ -12,6 +12,7 @@ type Neighbor = {
   phone: string;
   generated: number;
   paid: number;
+  balance?: number;
   active: boolean;
 };
 
@@ -36,14 +37,16 @@ type Payment = {
   neighborId: number;
   date: string;
   amount: number;
-  note: string;
+  note?: string;
   receipt: string;
+  activityId?: number | null;
+  concept?: string;
 };
 
 type AdminSection = "resumen" | "vecinos" | "actividades" | "asistencia" | "pagos" | "vistas" | "avisos" | "reportes";
 type VisitorView = "inicio" | "sencillo" | "detallado";
 type AttendanceStatus = "Presente" | "Faltó" | "Justificado";
-type CardStatus = "done" | "pending" | "exempt" | "empty";
+type CardStatus = "done" | "partial" | "pending" | "exempt" | "empty";
 type CardEntryDetail = {
   activityId: number;
   type: string;
@@ -51,6 +54,10 @@ type CardEntryDetail = {
   date: string;
   amount: number;
   charge: number;
+  charged: number;
+  paid: number;
+  balance: number;
+  paymentStatus: "none" | "pending" | "partial" | "paid";
   status: AttendanceStatus | "Programada";
 };
 type CardRow = {
@@ -99,6 +106,9 @@ type AttendanceRecord = {
   neighborId: number;
   status: AttendanceStatus;
   charge: number;
+  paid?: number;
+  balance?: number;
+  paymentStatus?: "none" | "pending" | "partial" | "paid";
   note: string;
 };
 
@@ -135,6 +145,10 @@ type PublicNeighborState = {
     amount: number;
     status: AttendanceStatus | "Programada";
     charge: number;
+    charged: number;
+    paid: number;
+    balance: number;
+    paymentStatus: "none" | "pending" | "partial" | "paid";
     cardRowIndex: number;
     cardSlotIndex: number;
   }>;
@@ -248,18 +262,6 @@ function debtCategoryFromRowIndex(rowIndex: number): DebtCategoryId {
   return debtCategories[rowIndex]?.id ?? "otros";
 }
 
-function outstandingDebtItems(items: DebtItem[], paidAmount: number) {
-  let paymentAvailable = Math.max(0, paidAmount);
-  return [...items]
-    .sort((first, second) => (first.sortDate ?? "").localeCompare(second.sortDate ?? ""))
-    .flatMap<DebtItem>((item) => {
-      const applied = Math.min(item.amount, paymentAvailable);
-      paymentAvailable -= applied;
-      const pendingAmount = Math.max(0, item.amount - applied);
-      return pendingAmount > 0 ? [{ ...item, amount: pendingAmount }] : [];
-    });
-}
-
 function readImageFile(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -301,17 +303,21 @@ async function prepareNoticeImage(file: File) {
 }
 
 function balanceOf(neighbor: Neighbor) {
-  return Math.max(0, neighbor.generated - neighbor.paid);
+  return Math.max(0, neighbor.balance ?? neighbor.generated - neighbor.paid);
 }
 
 function shortCardLabel(title: string) {
   return title.trim().slice(0, 18);
 }
 
-function cardStatusFromAttendance(status?: AttendanceStatus): CardStatus {
+function cardStatusFromAttendance(status?: AttendanceStatus, charge = 0, paid = 0, balance = charge): CardStatus {
   if (!status) return "empty";
-  if (status === "Faltó") return "pending";
   if (status === "Justificado") return "exempt";
+  if (status === "Faltó") {
+    if (charge > 0 && paid > 0 && balance <= 0) return "done";
+    if (paid > 0 && balance > 0) return "partial";
+    return "pending";
+  }
   return "done";
 }
 
@@ -340,7 +346,7 @@ function cardRowsFromRecords(activities: Activity[], attendance: AttendanceRecor
     const row = rows[activity.cardRowIndex];
     if (!row || activity.cardSlotIndex < 0 || activity.cardSlotIndex >= row.values.length) continue;
     const record = attendanceByActivity.get(activity.id);
-    row.values[activity.cardSlotIndex] = cardStatusFromAttendance(record?.status);
+    row.values[activity.cardSlotIndex] = cardStatusFromAttendance(record?.status, record?.charge, record?.paid, record?.balance);
     row.cellLabels[activity.cardSlotIndex] = shortCardLabel(activity.title);
     row.details[activity.cardSlotIndex] = `${activity.title} · ${formatDate(activity.date)}`;
     row.entries[activity.cardSlotIndex] = {
@@ -350,6 +356,10 @@ function cardRowsFromRecords(activities: Activity[], attendance: AttendanceRecor
       date: activity.date,
       amount: activity.fine,
       charge: record?.charge ?? 0,
+      charged: record?.charge ?? 0,
+      paid: record?.paid ?? 0,
+      balance: record?.balance ?? record?.charge ?? 0,
+      paymentStatus: record?.paymentStatus ?? "none",
       status: record?.status ?? "Programada",
     };
   }
@@ -475,9 +485,12 @@ export default function VecinalApp() {
     () => activityCharges.filter((charge) => charge.neighborId === demoNeighbor.id),
     [activityCharges, demoNeighbor.id]
   );
-  const visitorOutstandingDebtItems = useMemo(
-    () => outstandingDebtItems(visitorDebtItems, demoNeighbor.paid),
-    [visitorDebtItems, demoNeighbor.paid]
+  const visitorOutstandingDebtItems = visitorDebtItems;
+  const visitorActivityEntries = useMemo(
+    () => cardData
+      .flatMap((row) => row.entries.filter((entry): entry is CardEntryDetail => Boolean(entry)))
+      .sort((first, second) => second.date.localeCompare(first.date) || second.activityId - first.activityId),
+    [cardData],
   );
 
   function notify(message: string) {
@@ -608,6 +621,7 @@ export default function VecinalApp() {
           active: true,
           generated: state.totals.generated,
           paid: state.totals.paid,
+          balance: state.totals.balance,
         };
         const publicActivities: Activity[] = state.cardEntries.map((entry) => ({
           id: entry.id,
@@ -626,17 +640,20 @@ export default function VecinalApp() {
           neighborId: publicNeighbor.id,
           status: entry.status,
           charge: entry.charge,
+          paid: entry.paid,
+          balance: entry.balance,
+          paymentStatus: entry.paymentStatus,
           note: "",
         }]);
         setNeighbors([publicNeighbor]);
         setActivities(publicActivities);
         setPayments(state.payments.map((payment) => ({ ...payment, neighborId: publicNeighbor.id })));
         setCardData(cardRowsFromRecords(publicActivities, publicAttendance, publicNeighbor.id));
-        setActivityCharges(publicAttendance.flatMap<ActivityCharge>((record) => {
-          if (!record.charge) return [];
-          const activity = publicActivities.find((item) => item.id === record.activityId);
+        setActivityCharges(state.cardEntries.flatMap<ActivityCharge>((entry) => {
+          if (entry.balance <= 0) return [];
+          const activity = publicActivities.find((item) => item.id === entry.id);
           if (!activity) return [];
-          return [{ neighborId: publicNeighbor.id, activityId: activity.id, concept: debtConceptForActivity(activity), detail: activity.title, date: formatDate(activity.date), amount: record.charge, category: debtCategoryFromRowIndex(activity.cardRowIndex), sortDate: activity.date }];
+          return [{ neighborId: publicNeighbor.id, activityId: activity.id, concept: debtConceptForActivity(activity), detail: activity.title, date: formatDate(activity.date), amount: entry.balance, category: debtCategoryFromRowIndex(activity.cardRowIndex), sortDate: activity.date }];
         }));
         applyNotice(state.notice);
         applySettings(state.settings);
@@ -1090,12 +1107,12 @@ export default function VecinalApp() {
                       const month = fullMonthNames[monthIndex] ?? `Cuadro ${monthIndex + 1}`;
                       const cellLabel = row.cellLabels[monthIndex] ?? "";
                       const hasEntry = Boolean(row.entries[monthIndex] || cellLabel || row.details[monthIndex]);
-                      const statusText = status === "done" ? (row.kind === "attendance" ? "Cumplió" : "Pagó") : status === "pending" ? "Pendiente" : status === "exempt" ? (row.kind === "attendance" ? "Justificado" : "Exento") : hasEntry ? "Por registrar" : "Sin actividad";
+                      const statusText = status === "done" ? (row.kind === "attendance" ? "Cumplió o regularizó" : "Pagó") : status === "partial" ? "Pago parcial" : status === "pending" ? "Pendiente" : status === "exempt" ? (row.kind === "attendance" ? "Justificado" : "Exento") : hasEntry ? "Por registrar" : "Sin actividad";
                       const locationText = rowIndex === 0 ? `${row.label}, ${month}` : row.label;
                       return (
                         <button type="button" className={`summary-month ${status} ${hasEntry ? "has-entry" : ""}`} key={`${row.label}-${monthIndex}`} aria-label={`${locationText}: ${statusText}${hasEntry || status !== "empty" ? ". Toque para ver el detalle" : ""}`} onClick={() => (hasEntry || status !== "empty") && setSelectedCardCell({ rowIndex, monthIndex })} disabled={!hasEntry && status === "empty"}>
                           {rowIndex === 0 && <span>{month.slice(0, 3)}</span>}
-                          <b>{status === "done" ? "✓" : status === "pending" ? "×" : status === "exempt" ? "—" : hasEntry ? "•" : ""}</b>
+                          <b>{status === "done" ? "✓" : status === "partial" ? "◐" : status === "pending" ? "×" : status === "exempt" ? "—" : hasEntry ? "•" : ""}</b>
                           {cellLabel && <small>{cellLabel}</small>}
                         </button>
                       );
@@ -1145,8 +1162,8 @@ export default function VecinalApp() {
                     <tr key={row.label}>
                       <th>{row.label}</th>
                       {row.values.map((status, index) => (
-                        <td key={`${row.label}-${index}`} className={`card-status ${status}`} aria-label={`${row.label}, cuadro ${index + 1}: ${status === "done" ? "cumplido" : status === "pending" ? "pendiente" : status === "exempt" ? "exento o justificado" : "sin actividad"}`}>
-                          {status === "empty" ? <i>—</i> : <button type="button" onClick={() => setSelectedCardCell({ rowIndex: cardData.indexOf(row), monthIndex: index })}>{status === "done" ? "✓" : status === "pending" ? "×" : "—"}</button>}
+                        <td key={`${row.label}-${index}`} className={`card-status ${status}`} aria-label={`${row.label}, cuadro ${index + 1}: ${status === "done" ? "cumplido o regularizado" : status === "partial" ? "pago parcial" : status === "pending" ? "pendiente" : status === "exempt" ? "exento o justificado" : "sin actividad"}`}>
+                          {status === "empty" ? <i>—</i> : <button type="button" onClick={() => setSelectedCardCell({ rowIndex: cardData.indexOf(row), monthIndex: index })}>{status === "done" ? "✓" : status === "partial" ? "◐" : status === "pending" ? "×" : "—"}</button>}
                         </td>
                       ))}
                     </tr>
@@ -1156,23 +1173,54 @@ export default function VecinalApp() {
             </div>
             <div className="control-legend detailed-legend">
               <span><b className="legend-done">✓</b> Asistió o pagó</span>
+              <span><b className="legend-partial">◐</b> Pago parcial</span>
               <span><b className="legend-missed">×</b> Falta o aporte pendiente</span>
               <span><b className="legend-empty">—</b> No hubo actividad</span>
             </div>
             <div className="control-explanations">
-              <article><span className="explanation-icon missed">×</span><div><strong>Asamblea · 23 de agosto</strong><p>No asistió. Se generó una multa de Bs 50.</p></div></article>
-              <article><span className="explanation-icon done">✓</span><div><strong>Cuota mensual · agosto</strong><p>Pagó Bs 5 para mantenimiento de la zona.</p></div></article>
-              <article><span className="explanation-icon done">✓</span><div><strong>Desfile vecinal · 6 de agosto</strong><p>Asistió. No se generó ninguna multa.</p></div></article>
-              <article><span className="explanation-icon done">✓</span><div><strong>Trabajo comunal · 12 de julio</strong><p>Participó en la limpieza de áreas comunes.</p></div></article>
+              {visitorActivityEntries.map((entry) => {
+                const visualStatus = cardStatusFromAttendance(entry.status === "Programada" ? undefined : entry.status, entry.charged, entry.paid, entry.balance);
+                const explanation = entry.status === "Programada"
+                  ? `Programada para ${formatDate(entry.date)}.`
+                  : entry.status === "Justificado"
+                    ? "Registro exento o justificado."
+                    : entry.status === "Presente"
+                      ? "Cumplimiento confirmado."
+                      : entry.paymentStatus === "paid"
+                        ? `Falta registrada; deuda regularizada. Pagó Bs ${formatBs(entry.paid)}.`
+                        : entry.paymentStatus === "partial"
+                          ? `Pago parcial de Bs ${formatBs(entry.paid)}. Resta Bs ${formatBs(entry.balance)}.`
+                          : `Pendiente Bs ${formatBs(entry.balance || entry.charged)}.`;
+                return <article key={`explanation-${entry.activityId}`}><span className={`explanation-icon ${visualStatus === "pending" ? "missed" : visualStatus}`}>{visualStatus === "done" ? "✓" : visualStatus === "partial" ? "◐" : visualStatus === "pending" ? "×" : "—"}</span><div><strong>{entry.title}</strong><p>{explanation}</p></div></article>;
+              })}
+              {!visitorActivityEntries.length && <div className="empty-state"><strong>Aún no hay actividades registradas.</strong><span>Cuando la directiva registre una actividad aparecerá aquí.</span></div>}
             </div>
           </section>
           <section className="history-grid">
             <article className="history-panel">
-              <div className="section-heading"><div><span>Actividades</span><h2>Historial explicado</h2></div><b>3 registros</b></div>
+              <div className="section-heading"><div><span>Actividades</span><h2>Historial explicado</h2></div><b>{visitorActivityEntries.length} registros</b></div>
               <div className="timeline">
-                <TimelineItem date="23 AGO" title="Reunión mensual de agosto" meta="No asistió · Multa exacta por inasistencia" amount="Bs 50" tone="red" />
-                <TimelineItem date="12 JUL" title="Limpieza de áreas comunes" meta="Asistió y completó el trabajo · Sin multa" amount="Cumplido" tone="green" />
-                <TimelineItem date="06 AGO" title="Desfile cívico vecinal" meta="Asistió al desfile · Sin multa" amount="Cumplido" tone="green" />
+                {visitorActivityEntries.map((entry) => {
+                  const partial = entry.paymentStatus === "partial";
+                  const settled = entry.status === "Faltó" && entry.paymentStatus === "paid";
+                  const pending = entry.status === "Faltó" && !settled;
+                  const meta = settled
+                    ? "Falta registrada · deuda regularizada con pago"
+                    : partial
+                      ? `Pago parcial Bs ${formatBs(entry.paid)} · resta Bs ${formatBs(entry.balance)}`
+                      : entry.status === "Faltó"
+                        ? "Pendiente de regularización"
+                        : entry.status === "Justificado"
+                          ? "Exento o justificado"
+                          : entry.status === "Presente"
+                            ? "Cumplimiento confirmado"
+                            : "Actividad programada";
+                  const amount = entry.charged > 0
+                    ? entry.balance > 0 ? `Bs ${formatBs(entry.balance)}` : "Regularizado"
+                    : entry.status === "Programada" ? "Programada" : "Cumplido";
+                  return <TimelineItem key={`timeline-${entry.activityId}`} date={formatDate(entry.date)} title={entry.title} meta={meta} amount={amount} tone={partial ? "amber" : pending ? "red" : "green"} />;
+                })}
+                {!visitorActivityEntries.length && <div className="empty-state"><strong>Sin movimientos de actividades.</strong><span>Esta lista se completa con los registros reales del vecino.</span></div>}
               </div>
             </article>
             <article className="history-panel">
@@ -1181,7 +1229,7 @@ export default function VecinalApp() {
                 {visitorPayments.map((payment) => (
                   <div className="payment-item" key={payment.id}>
                     <div className="payment-mark">✓</div>
-                    <div><strong>Bs {formatBs(payment.amount)}</strong><span>{formatDate(payment.date)} · {payment.receipt}</span></div>
+                    <div><strong>Bs {formatBs(payment.amount)}</strong><span>{payment.concept ?? "Pago registrado"} · {formatDate(payment.date)} · {payment.receipt}</span></div>
                     <button onClick={() => notify(`Comprobante ${payment.receipt} preparado`)}>Ver</button>
                   </div>
                 ))}
@@ -1437,23 +1485,26 @@ function CardDetailDialog({ row, rowIndex, slotIndex, status, entry, onClose }: 
     : entry.status === "Justificado"
       ? isContribution ? "Exento" : "Justificado"
       : entry.status === "Faltó"
-        ? isContribution ? "Pendiente de pago" : "Pendiente de regularización"
+        ? entry.paymentStatus === "paid"
+          ? "Deuda regularizada"
+          : entry.paymentStatus === "partial"
+            ? "Pago parcial"
+            : isContribution ? "Pendiente de pago" : "Pendiente de regularización"
         : isContribution ? "Pagó" : rowIndex === 4 ? "Realizó la actividad" : "Asistió";
   const locationLabel = rowIndex === 0 ? `${row.label} · ${fullMonthNames[slotIndex] ?? ""}` : row.label;
-  const amount = isContribution ? (entry?.amount ?? 0) : (entry?.charge ?? 0);
-  const amountLabel = isContribution
-    ? status === "done" ? "Monto pagado" : status === "pending" ? "Monto pendiente" : "Monto de referencia"
-    : "Monto registrado";
   return <div className="cell-dialog-backdrop">
     <section className="cell-dialog" role="dialog" aria-modal="true" aria-labelledby="cell-dialog-title">
       <button type="button" className="dialog-close" onClick={onClose} aria-label="Cerrar detalle">×</button>
-      <div className={`dialog-status ${status}`} aria-hidden="true">{status === "done" ? "✓" : status === "pending" ? "×" : status === "exempt" ? "—" : "•"}</div>
+      <div className={`dialog-status ${status}`} aria-hidden="true">{status === "done" ? "✓" : status === "partial" ? "◐" : status === "pending" ? "×" : status === "exempt" ? "—" : "•"}</div>
       <span>{locationLabel}</span>
       <h2 id="cell-dialog-title">{entry?.title || "Registro sin detalle"}</h2>
       {entry && <p>{rowIndex === 3 ? entry.type : isContribution ? "Estado de la cuota registrada" : "Estado de la actividad registrada"}</p>}
       <dl>
         <div><dt>Resultado</dt><dd>{statusLabel}</dd></div>
-        {entry && amount > 0 && <div><dt>{amountLabel}</dt><dd>Bs {formatBs(amount)}</dd></div>}
+        {entry && entry.charged > 0 && <div><dt>Monto original</dt><dd>Bs {formatBs(entry.charged)}</dd></div>}
+        {entry && entry.paid > 0 && <div><dt>Monto abonado</dt><dd>Bs {formatBs(entry.paid)}</dd></div>}
+        {entry && entry.charged > 0 && <div><dt>Saldo pendiente</dt><dd>Bs {formatBs(entry.balance)}</dd></div>}
+        {entry && entry.charged <= 0 && isContribution && entry.amount > 0 && <div><dt>Monto de referencia</dt><dd>Bs {formatBs(entry.amount)}</dd></div>}
         {entry && <div><dt>Fecha del registro</dt><dd>{formatDate(entry.date)}</dd></div>}
       </dl>
       <button type="button" className="dialog-understood" onClick={onClose}>Entendido</button>
@@ -1516,18 +1567,8 @@ function NoticeAnnouncement({ notice, onClose }: { notice: Notice; onClose: () =
 }
 
 function DebtBreakdown({ total, items, compact = false }: { total: number; items: DebtItem[]; compact?: boolean }) {
-  const registeredTotal = items.reduce((sum, item) => sum + item.amount, 0);
-  const adjustment = total - registeredTotal;
-  const displayedItems = adjustment === 0 ? items : [
-    ...items,
-    {
-      concept: adjustment > 0 ? "Otros saldos pendientes" : "Pagos aplicados",
-      detail: adjustment > 0 ? "Importe pendiente de asignar" : "Descuento registrado después del detalle",
-      date: "Estado actualizado",
-      amount: adjustment,
-    },
-  ];
-  const calculatedTotal = displayedItems.reduce((sum, item) => sum + item.amount, 0);
+  const displayedItems = items.filter((item) => item.amount > 0);
+  const calculatedTotal = Math.max(0, total);
   return <section className={`debt-breakdown ${compact ? "compact" : ""}`} aria-label="Detalle de deuda pendiente">
     <header><div><span>Estado económico</span><h2>Detalle de deuda pendiente</h2></div><b>{displayedItems.length} {displayedItems.length === 1 ? "concepto" : "conceptos"}</b></header>
     <div className="debt-lines">{displayedItems.map((item) => <article key={`${item.concept}-${item.detail}`}><div><strong>{item.concept}</strong><span>{item.detail}</span><small>{item.date}</small></div><b>Bs {formatBs(item.amount)}</b></article>)}</div>
@@ -1535,7 +1576,7 @@ function DebtBreakdown({ total, items, compact = false }: { total: number; items
   </section>;
 }
 
-function TimelineItem({ date, title, meta, amount, tone }: { date: string; title: string; meta: string; amount: string; tone: "red" | "green" }) {
+function TimelineItem({ date, title, meta, amount, tone }: { date: string; title: string; meta: string; amount: string; tone: "red" | "green" | "amber" }) {
   return <div className="timeline-item"><div className="timeline-date">{date}</div><div><strong>{title}</strong><span>{meta}</span></div><b className={tone}>{amount}</b></div>;
 }
 
