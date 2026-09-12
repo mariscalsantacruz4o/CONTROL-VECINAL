@@ -46,7 +46,7 @@ type Payment = {
 type AdminSection = "resumen" | "vecinos" | "actividades" | "asistencia" | "pagos" | "vistas" | "avisos" | "reportes";
 type VisitorView = "inicio" | "sencillo" | "detallado";
 type AttendanceStatus = "Presente" | "Faltó" | "Justificado";
-type CardStatus = "done" | "partial" | "pending" | "exempt" | "empty";
+type CardStatus = "done" | "pending" | "exempt" | "empty";
 type CardEntryDetail = {
   activityId: number;
   type: string;
@@ -315,7 +315,6 @@ function cardStatusFromAttendance(status?: AttendanceStatus, charge = 0, paid = 
   if (status === "Justificado") return "exempt";
   if (status === "Faltó") {
     if (charge > 0 && paid > 0 && balance <= 0) return "done";
-    if (paid > 0 && balance > 0) return "partial";
     return "pending";
   }
   return "done";
@@ -1107,12 +1106,12 @@ export default function VecinalApp() {
                       const month = fullMonthNames[monthIndex] ?? `Cuadro ${monthIndex + 1}`;
                       const cellLabel = row.cellLabels[monthIndex] ?? "";
                       const hasEntry = Boolean(row.entries[monthIndex] || cellLabel || row.details[monthIndex]);
-                      const statusText = status === "done" ? (row.kind === "attendance" ? "Cumplió o regularizó" : "Pagó") : status === "partial" ? "Pago parcial" : status === "pending" ? "Pendiente" : status === "exempt" ? (row.kind === "attendance" ? "Justificado" : "Exento") : hasEntry ? "Por registrar" : "Sin actividad";
+                      const statusText = status === "done" ? (row.kind === "attendance" ? "Cumplió o regularizó" : "Pagó") : status === "pending" ? "Pendiente" : status === "exempt" ? (row.kind === "attendance" ? "Justificado" : "Exento") : hasEntry ? "Por registrar" : "Sin actividad";
                       const locationText = rowIndex === 0 ? `${row.label}, ${month}` : row.label;
                       return (
                         <button type="button" className={`summary-month ${status} ${hasEntry ? "has-entry" : ""}`} key={`${row.label}-${monthIndex}`} aria-label={`${locationText}: ${statusText}${hasEntry || status !== "empty" ? ". Toque para ver el detalle" : ""}`} onClick={() => (hasEntry || status !== "empty") && setSelectedCardCell({ rowIndex, monthIndex })} disabled={!hasEntry && status === "empty"}>
                           {rowIndex === 0 && <span>{month.slice(0, 3)}</span>}
-                          <b>{status === "done" ? "✓" : status === "partial" ? "◐" : status === "pending" ? "×" : status === "exempt" ? "—" : hasEntry ? "•" : ""}</b>
+                          <b>{status === "done" ? "✓" : status === "pending" ? "×" : status === "exempt" ? "—" : hasEntry ? "•" : ""}</b>
                           {cellLabel && <small>{cellLabel}</small>}
                         </button>
                       );
@@ -1162,8 +1161,8 @@ export default function VecinalApp() {
                     <tr key={row.label}>
                       <th>{row.label}</th>
                       {row.values.map((status, index) => (
-                        <td key={`${row.label}-${index}`} className={`card-status ${status}`} aria-label={`${row.label}, cuadro ${index + 1}: ${status === "done" ? "cumplido o regularizado" : status === "partial" ? "pago parcial" : status === "pending" ? "pendiente" : status === "exempt" ? "exento o justificado" : "sin actividad"}`}>
-                          {status === "empty" ? <i>—</i> : <button type="button" onClick={() => setSelectedCardCell({ rowIndex: cardData.indexOf(row), monthIndex: index })}>{status === "done" ? "✓" : status === "partial" ? "◐" : status === "pending" ? "×" : "—"}</button>}
+                        <td key={`${row.label}-${index}`} className={`card-status ${status}`} aria-label={`${row.label}, cuadro ${index + 1}: ${status === "done" ? "cumplido o regularizado" : status === "pending" ? "pendiente" : status === "exempt" ? "exento o justificado" : "sin actividad"}`}>
+                          {status === "empty" ? <i>—</i> : <button type="button" onClick={() => setSelectedCardCell({ rowIndex: cardData.indexOf(row), monthIndex: index })}>{status === "done" ? "✓" : status === "pending" ? "×" : "—"}</button>}
                         </td>
                       ))}
                     </tr>
@@ -1173,25 +1172,23 @@ export default function VecinalApp() {
             </div>
             <div className="control-legend detailed-legend">
               <span><b className="legend-done">✓</b> Asistió o pagó</span>
-              <span><b className="legend-partial">◐</b> Pago parcial</span>
               <span><b className="legend-missed">×</b> Falta o aporte pendiente</span>
               <span><b className="legend-empty">—</b> No hubo actividad</span>
             </div>
             <div className="control-explanations">
               {visitorActivityEntries.map((entry) => {
                 const visualStatus = cardStatusFromAttendance(entry.status === "Programada" ? undefined : entry.status, entry.charged, entry.paid, entry.balance);
+                const contribution = entry.cardRowIndex === 1 || entry.cardRowIndex === 2;
                 const explanation = entry.status === "Programada"
                   ? `Programada para ${formatDate(entry.date)}.`
                   : entry.status === "Justificado"
                     ? "Registro exento o justificado."
                     : entry.status === "Presente"
-                      ? "Cumplimiento confirmado."
+                      ? contribution ? "Pago confirmado." : "Cumplimiento confirmado."
                       : entry.paymentStatus === "paid"
-                        ? `Falta registrada; deuda regularizada. Pagó Bs ${formatBs(entry.paid)}.`
-                        : entry.paymentStatus === "partial"
-                          ? `Pago parcial de Bs ${formatBs(entry.paid)}. Resta Bs ${formatBs(entry.balance)}.`
-                          : `Pendiente Bs ${formatBs(entry.balance || entry.charged)}.`;
-                return <article key={`explanation-${entry.activityId}`}><span className={`explanation-icon ${visualStatus === "pending" ? "missed" : visualStatus}`}>{visualStatus === "done" ? "✓" : visualStatus === "partial" ? "◐" : visualStatus === "pending" ? "×" : "—"}</span><div><strong>{entry.title}</strong><p>{explanation}</p></div></article>;
+                        ? "Registro regularizado."
+                        : "Registro pendiente.";
+                return <article key={`explanation-${entry.activityId}`}><span className={`explanation-icon ${visualStatus === "pending" ? "missed" : visualStatus}`}>{visualStatus === "done" ? "✓" : visualStatus === "pending" ? "×" : "—"}</span><div><strong>{entry.title}</strong><p>{explanation}</p></div></article>;
               })}
               {!visitorActivityEntries.length && <div className="empty-state"><strong>Aún no hay actividades registradas.</strong><span>Cuando la directiva registre una actividad aparecerá aquí.</span></div>}
             </div>
@@ -1201,24 +1198,22 @@ export default function VecinalApp() {
               <div className="section-heading"><div><span>Actividades</span><h2>Historial explicado</h2></div><b>{visitorActivityEntries.length} registros</b></div>
               <div className="timeline">
                 {visitorActivityEntries.map((entry) => {
-                  const partial = entry.paymentStatus === "partial";
+                  const contribution = entry.cardRowIndex === 1 || entry.cardRowIndex === 2;
                   const settled = entry.status === "Faltó" && entry.paymentStatus === "paid";
                   const pending = entry.status === "Faltó" && !settled;
                   const meta = settled
                     ? "Falta registrada · deuda regularizada con pago"
-                    : partial
-                      ? `Pago parcial Bs ${formatBs(entry.paid)} · resta Bs ${formatBs(entry.balance)}`
-                      : entry.status === "Faltó"
+                    : entry.status === "Faltó"
                         ? "Pendiente de regularización"
                         : entry.status === "Justificado"
                           ? "Exento o justificado"
                           : entry.status === "Presente"
-                            ? "Cumplimiento confirmado"
+                            ? contribution ? "Pago confirmado" : "Cumplimiento confirmado"
                             : "Actividad programada";
                   const amount = entry.charged > 0
-                    ? entry.balance > 0 ? `Bs ${formatBs(entry.balance)}` : "Regularizado"
+                    ? entry.balance > 0 ? `Bs ${formatBs(entry.balance)}` : contribution ? "Pagado" : "Regularizado"
                     : entry.status === "Programada" ? "Programada" : "Cumplido";
-                  return <TimelineItem key={`timeline-${entry.activityId}`} date={formatDate(entry.date)} title={entry.title} meta={meta} amount={amount} tone={partial ? "amber" : pending ? "red" : "green"} />;
+                  return <TimelineItem key={`timeline-${entry.activityId}`} date={formatDate(entry.date)} title={entry.title} meta={meta} amount={amount} tone={pending ? "red" : "green"} />;
                 })}
                 {!visitorActivityEntries.length && <div className="empty-state"><strong>Sin movimientos de actividades.</strong><span>Esta lista se completa con los registros reales del vecino.</span></div>}
               </div>
@@ -1486,26 +1481,20 @@ function CardDetailDialog({ row, rowIndex, slotIndex, status, entry, onClose }: 
       ? isContribution ? "Exento" : "Justificado"
       : entry.status === "Faltó"
         ? entry.paymentStatus === "paid"
-          ? "Deuda regularizada"
-          : entry.paymentStatus === "partial"
-            ? "Pago parcial"
-            : isContribution ? "Pendiente de pago" : "Pendiente de regularización"
+          ? isContribution ? "Pagó" : "Regularizó"
+          : "Pendiente"
         : isContribution ? "Pagó" : rowIndex === 4 ? "Realizó la actividad" : "Asistió";
   const locationLabel = rowIndex === 0 ? `${row.label} · ${fullMonthNames[slotIndex] ?? ""}` : row.label;
   return <div className="cell-dialog-backdrop">
     <section className="cell-dialog" role="dialog" aria-modal="true" aria-labelledby="cell-dialog-title">
       <button type="button" className="dialog-close" onClick={onClose} aria-label="Cerrar detalle">×</button>
-      <div className={`dialog-status ${status}`} aria-hidden="true">{status === "done" ? "✓" : status === "partial" ? "◐" : status === "pending" ? "×" : status === "exempt" ? "—" : "•"}</div>
+      <div className={`dialog-status ${status}`} aria-hidden="true">{status === "done" ? "✓" : status === "pending" ? "×" : status === "exempt" ? "—" : "•"}</div>
       <span>{locationLabel}</span>
       <h2 id="cell-dialog-title">{entry?.title || "Registro sin detalle"}</h2>
-      {entry && <p>{rowIndex === 3 ? entry.type : isContribution ? "Estado de la cuota registrada" : "Estado de la actividad registrada"}</p>}
+      {entry && <p>{rowIndex === 3 ? entry.type : isContribution ? "Cuota registrada" : "Actividad registrada"}</p>}
       <dl>
         <div><dt>Resultado</dt><dd>{statusLabel}</dd></div>
-        {entry && entry.charged > 0 && <div><dt>Monto original</dt><dd>Bs {formatBs(entry.charged)}</dd></div>}
-        {entry && entry.paid > 0 && <div><dt>Monto abonado</dt><dd>Bs {formatBs(entry.paid)}</dd></div>}
-        {entry && entry.charged > 0 && <div><dt>Saldo pendiente</dt><dd>Bs {formatBs(entry.balance)}</dd></div>}
-        {entry && entry.charged <= 0 && isContribution && entry.amount > 0 && <div><dt>Monto de referencia</dt><dd>Bs {formatBs(entry.amount)}</dd></div>}
-        {entry && <div><dt>Fecha del registro</dt><dd>{formatDate(entry.date)}</dd></div>}
+        {entry && <div><dt>Fecha</dt><dd>{formatDate(entry.date)}</dd></div>}
       </dl>
       <button type="button" className="dialog-understood" onClick={onClose}>Entendido</button>
     </section>

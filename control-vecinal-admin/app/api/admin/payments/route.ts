@@ -77,59 +77,50 @@ export async function POST(request: Request) {
     const balanceCents = allocations.reduce((sum, allocation) => sum + allocation.balance, 0);
     if (balanceCents === 0) return Response.json({ error: "El vecino no tiene deuda pendiente" }, { status: 409 });
 
-    const target = activityId === null ? null : allocations.find((allocation) => allocation.activityId === activityId);
-    const targetCharge = activityId === null ? null : charges.find((charge) => charge.activityId === activityId);
-    if (activityId !== null && (!target || !targetCharge || target.balance <= 0)) {
+    if (activityId === null) {
+      return Response.json({
+        error: "Registre el resultado desde Control por vecino para asociar el pago a una actividad",
+      }, { status: 409 });
+    }
+
+    const target = allocations.find((allocation) => allocation.activityId === activityId);
+    const targetCharge = charges.find((charge) => charge.activityId === activityId);
+    if (!target || !targetCharge || target.balance <= 0) {
       return Response.json({ error: "Ese concepto no tiene deuda pendiente para este vecino" }, { status: 409 });
     }
-    if (target && amountCents > target.balance) {
+    if (amountCents < target.balance) {
+      return Response.json({
+        error: `No se permiten pagos parciales. El monto completo de este concepto es Bs ${(target.balance / 100).toFixed(2)}`,
+      }, { status: 409 });
+    }
+    if (amountCents > target.balance) {
       return Response.json({ error: `El pago supera el saldo de ese concepto: Bs ${(target.balance / 100).toFixed(2)}` }, { status: 409 });
     }
-    if (!target && amountCents > balanceCents) {
-      return Response.json({ error: `El pago supera el saldo pendiente de Bs ${(balanceCents / 100).toFixed(2)}` }, { status: 409 });
-    }
-    if (targetCharge && date < targetCharge.activityDate) {
+    if (date < targetCharge.activityDate) {
       return Response.json({ error: "La fecha del pago no puede ser anterior al concepto cobrado" }, { status: 409 });
     }
 
     const storedNote = paymentNoteForStorage(method, note);
-    const temporaryReceipt = `PENDING-${crypto.randomUUID()}${activityId ? `-A${activityId}` : ""}`;
-    let created: CreatedPaymentRow | null;
-    if (target && activityId !== null) {
-      created = await d1.prepare(`
-        INSERT INTO payments (neighbor_id, date, amount_cents, note, receipt)
-        SELECT ?, ?, ?, ?, ?
-        WHERE ? <= MAX(0,
-          (SELECT COALESCE(SUM(charge_cents), 0) FROM attendance_records WHERE neighbor_id = ?)
-          - (SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE neighbor_id = ?)
-        )
-        AND ? <= MAX(0,
-          (SELECT charge_cents FROM attendance_records WHERE neighbor_id = ? AND activity_id = ?)
-          - (SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE neighbor_id = ? AND receipt LIKE ?)
-          - ?
-        )
-        RETURNING id, neighbor_id AS neighborId, date, amount_cents AS amountCents,
-                  note, receipt, created_at AS createdAt
-      `).bind(
-        neighborId, date, amountCents, storedNote, temporaryReceipt,
-        amountCents, neighborId, neighborId,
-        amountCents, neighborId, activityId, neighborId, `%-A${activityId}`, target.legacyPaid,
-      ).first<CreatedPaymentRow>();
-    } else {
-      created = await d1.prepare(`
-        INSERT INTO payments (neighbor_id, date, amount_cents, note, receipt)
-        SELECT ?, ?, ?, ?, ?
-        WHERE ? <= MAX(0,
-          (SELECT COALESCE(SUM(charge_cents), 0) FROM attendance_records WHERE neighbor_id = ?)
-          - (SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE neighbor_id = ?)
-        )
-        RETURNING id, neighbor_id AS neighborId, date, amount_cents AS amountCents,
-                  note, receipt, created_at AS createdAt
-      `).bind(
-        neighborId, date, amountCents, storedNote, temporaryReceipt,
-        amountCents, neighborId, neighborId,
-      ).first<CreatedPaymentRow>();
-    }
+    const temporaryReceipt = `PENDING-${crypto.randomUUID()}-A${activityId}`;
+    const created = await d1.prepare(`
+      INSERT INTO payments (neighbor_id, date, amount_cents, note, receipt)
+      SELECT ?, ?, ?, ?, ?
+      WHERE ? = MAX(0,
+        (SELECT charge_cents FROM attendance_records WHERE neighbor_id = ? AND activity_id = ?)
+        - (SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE neighbor_id = ? AND receipt LIKE ?)
+        - ?
+      )
+      AND ? <= MAX(0,
+        (SELECT COALESCE(SUM(charge_cents), 0) FROM attendance_records WHERE neighbor_id = ?)
+        - (SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE neighbor_id = ?)
+      )
+      RETURNING id, neighbor_id AS neighborId, date, amount_cents AS amountCents,
+                note, receipt, created_at AS createdAt
+    `).bind(
+      neighborId, date, amountCents, storedNote, temporaryReceipt,
+      amountCents, neighborId, activityId, neighborId, `%-A${activityId}`, target.legacyPaid,
+      amountCents, neighborId, neighborId,
+    ).first<CreatedPaymentRow>();
     if (!created) {
       return Response.json({ error: "El saldo cambió mientras guardábamos. Revíselo e intente nuevamente" }, { status: 409 });
     }
@@ -150,14 +141,14 @@ export async function POST(request: Request) {
         note,
         amount: created.amountCents / 100,
         activityId,
-        activityTitle: targetCharge?.activityTitle ?? "Pago anterior sin concepto específico",
-        activityCode: targetCharge?.activityCode ?? "",
-        cardRowIndex: targetCharge?.cardRowIndex ?? null,
+        activityTitle: targetCharge.activityTitle,
+        activityCode: targetCharge.activityCode,
+        cardRowIndex: targetCharge.cardRowIndex,
         method,
-        allocationMethod: activityId ? "exact" : "legacy",
+        allocationMethod: "exact",
       },
       balance: (balanceCents - amountCents) / 100,
-      activityBalance: target ? (target.balance - amountCents) / 100 : null,
+      activityBalance: 0,
     }, { status: 201 });
   } catch (error) {
     return apiError(error);

@@ -1,7 +1,6 @@
 "use client";
 
 import { CSSProperties, FormEvent, useEffect, useMemo, useState } from "react";
-import { allocatePayments } from "../lib/payment-ledger";
 
 type Neighbor = {
   id: number;
@@ -33,7 +32,6 @@ type Activity = {
 
 type DebtItem = { concept: string; detail: string; date: string; amount: number; category?: ActivityCategoryId; sortDate?: string };
 type ActivityCharge = DebtItem & { neighborId: number; activityId: number };
-type PaymentConcept = ActivityCharge & { original: number; paidAmount: number; remaining: number };
 
 type Payment = {
   id: number;
@@ -50,12 +48,10 @@ type Payment = {
   allocationMethod?: "exact" | "legacy";
 };
 
-type PaymentMethod = "Efectivo" | "QR bancario" | "Transferencia" | "Otro";
-type PaymentMode = "full" | "partial";
 type AccountMovement = {
   key: string;
   rawDate: string;
-  type: "charge" | "payment";
+  type: "control" | "charge" | "payment";
   concept: string;
   detail: string;
   receipt: string;
@@ -63,23 +59,11 @@ type AccountMovement = {
   payment: number;
   balance: number;
 };
-type PaymentDraft = {
-  neighborId: number;
-  activityId: number;
-  neighborName: string;
-  neighborLot: string;
-  concept: string;
-  amount: number;
-  date: string;
-  method: PaymentMethod;
-  note: string;
-  remainingBefore: number;
-};
-type PaymentResult = PaymentDraft & { payment: Payment; remainingAfter: number };
 
-type AdminSection = "resumen" | "vecinos" | "actividades" | "asistencia" | "pagos" | "vistas" | "avisos" | "reportes";
+type AdminSection = "resumen" | "vecinos" | "padron" | "actividades" | "asistencia" | "pagos" | "vistas" | "avisos" | "reportes";
 type VisitorView = "inicio" | "sencillo" | "detallado";
 type AttendanceStatus = "Presente" | "Faltó" | "Justificado";
+type ControlStatus = AttendanceStatus | "Regularizado" | "Sin registrar";
 type CardStatus = "done" | "pending" | "empty";
 type ActivityCategoryId = "asambleas" | "cuotas-mensuales" | "cuotas-extras" | "otros" | "trabajos";
 type CardRow = {
@@ -130,6 +114,9 @@ type AttendanceRecord = {
   neighborId: number;
   status: AttendanceStatus;
   charge: number;
+  paid?: number;
+  balance?: number;
+  paymentStatus?: "none" | "pending" | "partial" | "paid";
   note: string;
 };
 
@@ -232,9 +219,10 @@ const cardRows: CardRow[] = [
 const navItems: Array<{ id: AdminSection; label: string; icon: string }> = [
   { id: "resumen", label: "Inicio", icon: "⌂" },
   { id: "vecinos", label: "Vecinos y QR", icon: "◎" },
+  { id: "padron", label: "Padrón y calles", icon: "▦" },
   { id: "actividades", label: "Actividades y cuotas", icon: "◇" },
   { id: "asistencia", label: "Control por vecino", icon: "✓" },
-  { id: "pagos", label: "Pagos", icon: "Bs" },
+  { id: "pagos", label: "Historial", icon: "Bs" },
   { id: "vistas", label: "Vistas del vecino", icon: "✎" },
   { id: "avisos", label: "Avisos", icon: "!" },
   { id: "reportes", label: "Reportes", icon: "↓" },
@@ -306,22 +294,30 @@ function outstandingDebtItems(items: DebtItem[], paidAmount: number) {
     });
 }
 
-function paymentConceptsFor(neighborId: number, charges: ActivityCharge[], paymentRows: Payment[]) {
-  const ordered = charges
-    .filter((charge) => charge.neighborId === neighborId)
-    .sort((first, second) => first.activityId - second.activityId);
-  const chargeByActivity = new Map(ordered.map((charge) => [charge.activityId, charge]));
-  return allocatePayments(
-    ordered.map((charge) => ({ activityId: charge.activityId, amount: charge.amount, order: charge.activityId })),
-    paymentRows.filter((payment) => payment.neighborId === neighborId).map((payment) => ({ receipt: payment.receipt, amount: payment.amount })),
-  ).flatMap<PaymentConcept>((allocation) => {
-    const charge = chargeByActivity.get(allocation.activityId);
-    return charge ? [{ ...charge, original: allocation.charged, paidAmount: allocation.paid, remaining: allocation.balance }] : [];
-  });
-}
-
-function accountMovementsFor(neighborId: number, charges: ActivityCharge[], paymentRows: Payment[]) {
+function accountMovementsFor(neighborId: number, charges: ActivityCharge[], paymentRows: Payment[], attendanceRows: AttendanceRecord[], activityRows: Activity[]) {
   const rows = [
+    ...attendanceRows.filter((record) => record.neighborId === neighborId).flatMap((record) => {
+      const activity = activityRows.find((item) => item.id === record.activityId);
+      if (!activity) return [];
+      const contribution = isContributionActivity(activity);
+      const result = record.status === "Justificado"
+        ? contribution ? "Exento" : "Justificado"
+        : record.status === "Presente"
+          ? contribution ? "Pagó" : activity.cardRowIndex === 4 ? "Realizó" : "Asistió"
+          : record.paymentStatus === "paid"
+            ? "Regularizó"
+            : contribution ? "No pagó" : activity.cardRowIndex === 4 ? "No realizó" : "No asistió";
+      return [{
+        key: `s-${record.activityId}`,
+        rawDate: activity.date,
+        type: "control" as const,
+        concept: activity.title,
+        detail: `${activityCategoryFromRowIndex(activity.cardRowIndex).label} · ${result}`,
+        receipt: "",
+        charge: 0,
+        payment: 0,
+      }];
+    }),
     ...charges.filter((charge) => charge.neighborId === neighborId).map((charge) => ({
       key: `c-${charge.activityId}`,
       rawDate: charge.sortDate ?? "",
@@ -342,12 +338,21 @@ function accountMovementsFor(neighborId: number, charges: ActivityCharge[], paym
       charge: 0,
       payment: payment.amount,
     })),
-  ].sort((first, second) => first.rawDate.localeCompare(second.rawDate) || (first.type === second.type ? first.key.localeCompare(second.key) : first.type === "charge" ? -1 : 1));
+  ].sort((first, second) => {
+    const dateOrder = first.rawDate.localeCompare(second.rawDate);
+    if (dateOrder) return dateOrder;
+    const rank = { control: 0, charge: 1, payment: 2 } as const;
+    return rank[first.type] - rank[second.type] || first.key.localeCompare(second.key);
+  });
   let balance = 0;
   return rows.map<AccountMovement>((row) => {
     balance = Math.round((balance + row.charge - row.payment) * 100) / 100;
     return { ...row, balance };
   });
+}
+
+function movementLabel(type: AccountMovement["type"]) {
+  return type === "control" ? "Estado" : type === "charge" ? "Cargo" : "Pago";
 }
 
 function searchableText(value: string) {
@@ -433,7 +438,13 @@ function cardRowsFromRecords(activities: Activity[], attendance: AttendanceRecor
     const row = rows[activity.cardRowIndex];
     if (!row || activity.cardSlotIndex < 0 || activity.cardSlotIndex >= row.values.length) continue;
     const record = attendanceByActivity.get(activity.id);
-    row.values[activity.cardSlotIndex] = !record ? "empty" : record.status === "Faltó" ? "pending" : "done";
+    row.values[activity.cardSlotIndex] = !record
+      ? "empty"
+      : record.status === "Justificado"
+        ? "done"
+        : record.status === "Faltó" && record.paymentStatus !== "paid"
+          ? "pending"
+          : "done";
     row.cellLabels[activity.cardSlotIndex] = shortCardLabel(activity.type, activity.title, activity.fine);
     row.details[activity.cardSlotIndex] = `${activity.title} · ${formatDate(activity.date)}${record ? ` · ${record.status}` : " · Programada"}${record?.charge ? ` · Multa Bs ${formatBs(record.charge)}` : ""}`;
   }
@@ -492,6 +503,7 @@ export default function VecinalApp() {
   const [neighbors, setNeighbors] = useState<Neighbor[]>([]);
   const [neighborSearch, setNeighborSearch] = useState("");
   const [activities, setActivities] = useState<Activity[]>([]);
+  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [cardData, setCardData] = useState<CardRow[]>(() => emptyCardRows());
   const [viewEditorMode, setViewEditorMode] = useState<ViewEditorMode>("tarjeta");
@@ -519,19 +531,12 @@ export default function VecinalApp() {
   });
   const [noticeImageBusy, setNoticeImageBusy] = useState(false);
   const [selectedActivity, setSelectedActivity] = useState(0);
-  const [attendanceByActivity, setAttendanceByActivity] = useState<Record<number, Record<number, AttendanceStatus>>>({});
+  const [controlSearch, setControlSearch] = useState("");
+  const [attendanceByActivity, setAttendanceByActivity] = useState<Record<number, Record<number, ControlStatus>>>({});
   const [activityCharges, setActivityCharges] = useState<ActivityCharge[]>([]);
+  const [registrySearch, setRegistrySearch] = useState("");
   const [paymentNeighborSearch, setPaymentNeighborSearch] = useState("");
   const [selectedPaymentNeighborId, setSelectedPaymentNeighborId] = useState<number | null>(null);
-  const [selectedPaymentActivityId, setSelectedPaymentActivityId] = useState<number | null>(null);
-  const [paymentMode, setPaymentMode] = useState<PaymentMode>("full");
-  const [paymentAmount, setPaymentAmount] = useState("");
-  const [paymentDate, setPaymentDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("Efectivo");
-  const [paymentNote, setPaymentNote] = useState("");
-  const [paymentDraft, setPaymentDraft] = useState<PaymentDraft | null>(null);
-  const [paymentSaving, setPaymentSaving] = useState(false);
-  const [lastPayment, setLastPayment] = useState<PaymentResult | null>(null);
   const [toast, setToast] = useState("");
   const [adminLoading, setAdminLoading] = useState(true);
   const [adminError, setAdminError] = useState("");
@@ -560,6 +565,32 @@ export default function VecinalApp() {
     }
     return [...groups.values()].filter((group) => group.length > 1);
   }, [neighbors]);
+  const activeNeighbors = useMemo(() => neighbors.filter((neighbor) => neighbor.active), [neighbors]);
+  const registeredLots = useMemo(() => new Set(activeNeighbors.map((neighbor) => normalizedLotKey(neighbor.lot)).filter((lot) => lot && lot !== "—")), [activeNeighbors]);
+  const registeredStreetCount = useMemo(() => new Set(activeNeighbors.map((neighbor) => searchableText(neighbor.street)).filter((street) => street && street !== "por completar")).size, [activeNeighbors]);
+  const incompleteNeighborCount = useMemo(() => activeNeighbors.filter((neighbor) => {
+    const street = searchableText(neighbor.street);
+    const lot = normalizedLotKey(neighbor.lot);
+    return !street || street === "por completar" || !lot || lot === "—";
+  }).length, [activeNeighbors]);
+  const registryMatches = useMemo(() => {
+    const query = searchableText(registrySearch);
+    if (!query) return activeNeighbors;
+    return activeNeighbors.filter((neighbor) => searchableText(`${neighbor.name} ${neighbor.street} ${neighbor.lot} ${neighbor.code}`).includes(query));
+  }, [activeNeighbors, registrySearch]);
+  const streetGroups = useMemo(() => {
+    const groups = new Map<string, { name: string; neighbors: Neighbor[] }>();
+    for (const neighbor of registryMatches) {
+      const rawName = neighbor.street.trim() || "POR COMPLETAR";
+      const key = searchableText(rawName) || "por completar";
+      const current = groups.get(key) ?? { name: rawName, neighbors: [] };
+      current.neighbors.push(neighbor);
+      groups.set(key, current);
+    }
+    return [...groups.values()]
+      .map((group) => ({ ...group, neighbors: [...group.neighbors].sort((a, b) => a.lot.localeCompare(b.lot, "es", { numeric: true })) }))
+      .sort((a, b) => a.name.localeCompare(b.name, "es"));
+  }, [registryMatches]);
   const activitiesToReview = useMemo(() => activities.flatMap((activity) => {
     const suggestion = suggestedCategoryForActivity(activity);
     return suggestion ? [{ activity, suggestion }] : [];
@@ -568,23 +599,32 @@ export default function VecinalApp() {
   const selectedAttendance = attendanceByActivity[selectedActivity] ?? {};
   const selectedActivityCategory = activityCategoryFromRowIndex(selectedActivityData?.cardRowIndex ?? 0);
   const selectedActivityIsContribution = selectedActivityCategory.kind === "contribution";
-  const selectedStatusOptions: Array<{ value: AttendanceStatus; label: string }> = selectedActivityIsContribution
+  const selectedStatusOptions: Array<{ value: ControlStatus; label: string }> = selectedActivityIsContribution
     ? [
-        { value: "Faltó", label: "× Pendiente" },
+        { value: "Presente", label: "✓ Pagó" },
+        { value: "Faltó", label: "× No pagó" },
         { value: "Justificado", label: "— Exento" },
       ]
     : selectedActivityData?.cardRowIndex === 4
       ? [
           { value: "Presente", label: "✓ Realizó" },
-          { value: "Faltó", label: "× Pendiente" },
+          { value: "Faltó", label: "× No realizó" },
+          ...(selectedActivityData?.fine > 0 ? [{ value: "Regularizado" as const, label: "✓ Regularizó" }] : []),
           { value: "Justificado", label: "— Justificado" },
         ]
       : [
           { value: "Presente", label: "✓ Asistió" },
-          { value: "Faltó", label: "× Pendiente" },
+          { value: "Faltó", label: "× No asistió" },
+          ...(selectedActivityData?.fine > 0 ? [{ value: "Regularizado" as const, label: "✓ Regularizó" }] : []),
           { value: "Justificado", label: "— Justificado" },
         ];
   const selectedPendingCount = Object.values(selectedAttendance).filter((status) => status === "Faltó").length;
+  const selectedUnregisteredCount = activeNeighbors.filter((neighbor) => (selectedAttendance[neighbor.id] ?? "Sin registrar") === "Sin registrar").length;
+  const controlNeighbors = useMemo(() => {
+    const query = searchableText(controlSearch);
+    if (!query) return activeNeighbors;
+    return activeNeighbors.filter((neighbor) => searchableText(`${neighbor.name} ${neighbor.street} ${neighbor.lot} ${neighbor.code}`).includes(query));
+  }, [activeNeighbors, controlSearch]);
   const paymentNeighborOptions = useMemo(() => {
     const query = searchableText(paymentNeighborSearch);
     const matches = !query ? neighbors : neighbors.filter((neighbor) => searchableText(`${neighbor.name} ${neighbor.lot} ${neighbor.code}`).includes(query));
@@ -592,15 +632,9 @@ export default function VecinalApp() {
     return selected && !matches.some((neighbor) => neighbor.id === selected.id) ? [selected, ...matches] : matches;
   }, [neighbors, paymentNeighborSearch, selectedPaymentNeighborId]);
   const selectedPaymentNeighbor = neighbors.find((neighbor) => neighbor.id === selectedPaymentNeighborId) ?? null;
-  const selectedPaymentConcepts = useMemo(
-    () => selectedPaymentNeighborId ? paymentConceptsFor(selectedPaymentNeighborId, activityCharges, payments) : [],
-    [selectedPaymentNeighborId, activityCharges, payments],
-  );
-  const pendingPaymentConcepts = selectedPaymentConcepts.filter((concept) => concept.remaining > 0);
-  const selectedPaymentConcept = selectedPaymentConcepts.find((concept) => concept.activityId === selectedPaymentActivityId && concept.remaining > 0) ?? null;
   const selectedAccountMovements = useMemo(
-    () => selectedPaymentNeighborId ? accountMovementsFor(selectedPaymentNeighborId, activityCharges, payments) : [],
-    [selectedPaymentNeighborId, activityCharges, payments],
+    () => selectedPaymentNeighborId ? accountMovementsFor(selectedPaymentNeighborId, activityCharges, payments, attendanceRecords, activities) : [],
+    [selectedPaymentNeighborId, activityCharges, payments, attendanceRecords, activities],
   );
   const selectedCardRow = cardData[selectedCardCategory] ?? cardData[0] ?? cardRows[0];
   const selectedCardStatus = selectedCardRow.values[selectedCardMonth] ?? "empty";
@@ -680,14 +714,25 @@ export default function VecinalApp() {
       const state = normalizeAdminState(response);
       setNeighbors(state.neighbors);
       setActivities(state.activities);
+      setAttendanceRecords(state.attendance);
       setPayments(state.payments);
-      const recordsByActivity: Record<number, Record<number, AttendanceStatus>> = {};
+      const recordsByActivity: Record<number, Record<number, ControlStatus>> = {};
       for (const activity of state.activities) {
-        const defaultStatus: AttendanceStatus = isContributionActivity(activity) ? "Faltó" : "Presente";
-        recordsByActivity[activity.id] = Object.fromEntries(state.neighbors.map((neighbor) => [neighbor.id, defaultStatus]));
+        recordsByActivity[activity.id] = Object.fromEntries(state.neighbors.map((neighbor) => [neighbor.id, "Sin registrar" as ControlStatus]));
       }
       for (const record of state.attendance) {
-        recordsByActivity[record.activityId] = { ...(recordsByActivity[record.activityId] ?? {}), [record.neighborId]: record.status };
+        const activity = state.activities.find((item) => item.id === record.activityId);
+        const contribution = isContributionActivity(activity);
+        const controlStatus: ControlStatus = contribution
+          ? record.status === "Justificado"
+            ? "Justificado"
+            : record.paymentStatus === "paid"
+              ? "Presente"
+              : "Faltó"
+          : record.status === "Faltó" && record.paymentStatus === "paid"
+            ? "Regularizado"
+            : record.status;
+        recordsByActivity[record.activityId] = { ...(recordsByActivity[record.activityId] ?? {}), [record.neighborId]: controlStatus };
       }
       setAttendanceByActivity(recordsByActivity);
       setActivityCharges(state.attendance.flatMap<ActivityCharge>((record) => {
@@ -714,6 +759,7 @@ export default function VecinalApp() {
     } catch (error) {
       setNeighbors([]);
       setActivities([]);
+      setAttendanceRecords([]);
       setPayments([]);
       setAttendanceByActivity({});
       setActivityCharges([]);
@@ -898,26 +944,22 @@ export default function VecinalApp() {
     }
   }
 
+  async function deleteActivity(activity: Activity) {
+    const confirmed = window.confirm(
+      `¿Eliminar “${activity.title}”?\n\nSolo se eliminará si todavía no tiene control ni pagos. Los registros con historial quedan protegidos.`,
+    );
+    if (!confirmed) return;
+    try {
+      await apiRequest(`/api/admin/activities?id=${activity.id}`, { method: "DELETE" });
+      await loadAdminState(false);
+      notify("Actividad vacía eliminada correctamente");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "No se pudo eliminar la actividad");
+    }
+  }
+
   function choosePaymentNeighbor(id: number | null) {
     setSelectedPaymentNeighborId(id);
-    setSelectedPaymentActivityId(null);
-    setPaymentAmount("");
-    setPaymentMode("full");
-    setPaymentDraft(null);
-    setLastPayment(null);
-  }
-
-  function choosePaymentConcept(concept: PaymentConcept) {
-    setSelectedPaymentActivityId(concept.activityId);
-    setPaymentMode("full");
-    setPaymentAmount(concept.remaining.toFixed(2));
-    setPaymentDraft(null);
-    setLastPayment(null);
-  }
-
-  function changePaymentMode(mode: PaymentMode) {
-    setPaymentMode(mode);
-    setPaymentAmount(mode === "full" && selectedPaymentConcept ? selectedPaymentConcept.remaining.toFixed(2) : "");
   }
 
   function openNeighborAccount(id: number) {
@@ -925,76 +967,6 @@ export default function VecinalApp() {
     setPaymentNeighborSearch("");
     setSection("pagos");
     window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
-  function reviewPayment(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedPaymentNeighbor || !selectedPaymentConcept) {
-      notify("Seleccione un vecino y un concepto pendiente");
-      return;
-    }
-    const rawAmount = paymentMode === "full" ? selectedPaymentConcept.remaining : Number(paymentAmount);
-    const amount = Math.round(rawAmount * 100) / 100;
-    if (!Number.isFinite(amount) || amount <= 0) {
-      notify("Escriba un monto válido");
-      return;
-    }
-    if (amount > selectedPaymentConcept.remaining) {
-      notify(`El pago no puede superar Bs ${formatBs(selectedPaymentConcept.remaining)}`);
-      return;
-    }
-    if (paymentDate < (selectedPaymentConcept.sortDate ?? "")) {
-      notify("La fecha del pago no puede ser anterior al concepto cobrado");
-      return;
-    }
-    setPaymentDraft({
-      neighborId: selectedPaymentNeighbor.id,
-      activityId: selectedPaymentConcept.activityId,
-      neighborName: selectedPaymentNeighbor.name,
-      neighborLot: selectedPaymentNeighbor.lot,
-      concept: selectedPaymentConcept.detail,
-      amount,
-      date: paymentDate,
-      method: paymentMethod,
-      note: paymentNote.trim(),
-      remainingBefore: selectedPaymentConcept.remaining,
-    });
-  }
-
-  async function confirmPayment() {
-    if (!paymentDraft || paymentSaving) return;
-    setPaymentSaving(true);
-    try {
-      const result = await apiRequest<{ payment: Payment }>("/api/admin/payments", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          neighborId: paymentDraft.neighborId,
-          activityId: paymentDraft.activityId,
-          amount: paymentDraft.amount,
-          date: paymentDraft.date,
-          method: paymentDraft.method,
-          note: paymentDraft.note,
-        }),
-      });
-      const completedDraft = paymentDraft;
-      setLastPayment({
-        ...completedDraft,
-        payment: result.payment,
-        remainingAfter: Math.max(0, completedDraft.remainingBefore - completedDraft.amount),
-      });
-      setPaymentDraft(null);
-      setSelectedPaymentActivityId(null);
-      setPaymentAmount("");
-      setPaymentMode("full");
-      setPaymentNote("");
-      await loadAdminState(false);
-      notify(`Pago registrado · ${result.payment.receipt}`);
-    } catch (error) {
-      notify(error instanceof Error ? error.message : "No se pudo registrar el pago");
-    } finally {
-      setPaymentSaving(false);
-    }
   }
 
   async function publishNotice(event: FormEvent<HTMLFormElement>) {
@@ -1030,31 +1002,55 @@ export default function VecinalApp() {
       return;
     }
     const currentRecords = attendanceByActivity[selectedActivity] ?? {};
-    const defaultStatus: AttendanceStatus = isContributionActivity(selectedActivityData) ? "Faltó" : "Presente";
+    const defaultStatus: ControlStatus = "Sin registrar";
+    const unregistered = neighbors.filter((neighbor) => neighbor.active && (currentRecords[neighbor.id] ?? defaultStatus) === "Sin registrar");
+    if (unregistered.length) {
+      notify(`Falta elegir un resultado para ${unregistered.length} vecino(s)`);
+      return;
+    }
+    const selections = neighbors.filter((neighbor) => neighbor.active).map((neighbor) => currentRecords[neighbor.id] ?? defaultStatus);
+    const confirmedCount = selections.filter((status) => status === "Presente").length;
+    const regularizedCount = selections.filter((status) => status === "Regularizado").length;
+    const pendingCount = selections.filter((status) => status === "Faltó").length;
+    const exemptCount = selections.filter((status) => status === "Justificado").length;
+    const paymentSelections = selectedActivityIsContribution ? confirmedCount : regularizedCount;
+    const confirmation = window.confirm(
+      `Revise antes de guardar “${selectedActivityData.title}”:\n\n✓ Confirmados: ${confirmedCount}\n✓ Regularizados: ${regularizedCount}\n× Pendientes: ${pendingCount}\n— Exentos o justificados: ${exemptCount}\n\n${paymentSelections ? `Se registrará el pago completo para ${paymentSelections} vecino(s).` : "No se crearán pagos nuevos."}\n\n¿Los datos son correctos?`,
+    );
+    if (!confirmation) return;
     try {
-      const result = await apiRequest<{ absentCount: number; generated: number }>("/api/admin/attendance", {
+      const result = await apiRequest<{ pendingCount: number; generated: number; paidCount: number; paid: number }>("/api/admin/attendance", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           activityId: selectedActivity,
+          recordedDate: today,
           records: neighbors.filter((neighbor) => neighbor.active).map((neighbor) => ({
             neighborId: neighbor.id,
-            status: currentRecords[neighbor.id] ?? defaultStatus,
+            status: (currentRecords[neighbor.id] ?? defaultStatus) === "Regularizado" ? "Faltó" : currentRecords[neighbor.id] ?? defaultStatus,
+            settled: (currentRecords[neighbor.id] ?? defaultStatus) === "Regularizado" || (selectedActivityIsContribution && (currentRecords[neighbor.id] ?? defaultStatus) === "Presente"),
             note: "",
           })),
         }),
       });
       await loadAdminState(false);
-      notify(selectedActivityIsContribution
-        ? result.absentCount
-          ? `${result.absentCount} cuota(s) pendiente(s) · Bs ${formatBs(result.generated)}`
-          : "Estado de cuotas guardado sin pendientes"
-        : result.absentCount
-          ? `${result.absentCount} registro(s) pendiente(s) · deuda Bs ${formatBs(result.generated)}`
-          : "Control guardado sin pendientes");
+      const paymentMessage = result.paidCount ? ` · ${result.paidCount} pago(s) guardado(s), Bs ${formatBs(result.paid)}` : "";
+      notify(result.pendingCount
+        ? `${result.pendingCount} registro(s) con × pendiente(s)${paymentMessage}`
+        : `Control guardado sin pendientes${paymentMessage}`);
     } catch (error) {
       notify(error instanceof Error ? error.message : "No se pudo guardar la asistencia");
     }
+  }
+
+  function setAllControlStatus(status: ControlStatus) {
+    if (!selectedActivityData || !activeNeighbors.length) return;
+    const label = selectedStatusOptions.find((option) => option.value === status)?.label ?? status;
+    if (!window.confirm(`¿Aplicar “${label}” a los ${activeNeighbors.length} vecinos?\n\nDespués puede corregir casos individuales antes de guardar.`)) return;
+    setAttendanceByActivity((current) => ({
+      ...current,
+      [selectedActivity]: Object.fromEntries(activeNeighbors.map((neighbor) => [neighbor.id, status])),
+    }));
   }
 
   async function downloadQrPdf() {
@@ -1062,13 +1058,13 @@ export default function VecinalApp() {
     const [{ jsPDF }, QRCode] = await Promise.all([import("jspdf"), import("qrcode")]);
     const doc = new jsPDF({ unit: "mm", format: "letter", orientation: "portrait", compress: true });
     const activeNeighbors = neighbors.filter((neighbor) => neighbor.active);
-    const cardWidth = 38;
-    const cardHeight = 37;
+    const cardWidth = 37;
+    const cardHeight = 38;
     const columns = 5;
-    const rows = 6;
+    const rows = 7;
     const cardsPerPage = columns * rows;
     const gapX = 2;
-    const gapY = 4;
+    const gapY = 1;
     const occupiedWidth = columns * cardWidth + (columns - 1) * gapX;
     const occupiedHeight = rows * cardHeight + (rows - 1) * gapY;
     const startX = (doc.internal.pageSize.getWidth() - occupiedWidth) / 2;
@@ -1085,9 +1081,9 @@ export default function VecinalApp() {
       doc.setDrawColor(77, 101, 130);
       doc.setLineWidth(0.25);
       doc.rect(x, y, cardWidth, cardHeight);
-      const qrX = x + 4;
-      const qrY = y + 0.8;
-      const qrSize = 30;
+      const qrX = x + 2;
+      const qrY = y + 0.4;
+      const qrSize = 33;
       const quietModules = 4;
       const moduleSize = qrSize / (qr.modules.size + quietModules * 2);
       const modulesX = qrX + quietModules * moduleSize;
@@ -1113,12 +1109,20 @@ export default function VecinalApp() {
         }
       }
       doc.setFont("helvetica", "bold");
-      doc.setFontSize(5);
-      const nameLines = doc.splitTextToSize(neighbor.name.toUpperCase(), 35).slice(0, 2);
-      doc.text(nameLines, x + cardWidth / 2, y + 32.5, { align: "center", lineHeightFactor: 0.85 });
+      doc.setFontSize(4.5);
+      const nameLine = doc.splitTextToSize(neighbor.name.toUpperCase(), 35)[0] || neighbor.name.toUpperCase();
+      doc.text(nameLine, x + cardWidth / 2, y + 36.7, { align: "center" });
     }
     doc.save("QR_VECINOS_UV_4-O_2026.pdf");
     notify("PDF de QR descargado");
+  }
+
+  function downloadRegistryCsv(list: Neighbor[] = activeNeighbors, label = "COMPLETO") {
+    saveCsv(`PADRON_VECINAL_${safeFilePart(label)}_${today}.csv`, [
+      ["Código", "Nombre completo", "Calle o avenida", "Lote", "Teléfono", "Estado"],
+      ...list.map((neighbor) => [neighbor.code, neighbor.name, neighbor.street, neighbor.lot, neighbor.phone, neighbor.active ? "Activo" : "Inactivo"]),
+    ]);
+    notify(`Padrón ${label === "COMPLETO" ? "completo" : `de ${label}`} descargado`);
   }
 
   function downloadDebtorsCsv() {
@@ -1180,7 +1184,7 @@ export default function VecinalApp() {
       ["Fecha", "Movimiento", "Concepto", "Detalle", "Comprobante", "Cargo Bs", "Pago Bs", "Saldo Bs"],
       ...movements.map((movement) => [
         movement.rawDate,
-        movement.type === "charge" ? "Cargo" : "Pago",
+        movementLabel(movement.type),
         movement.concept,
         movement.detail,
         movement.receipt,
@@ -1219,7 +1223,7 @@ export default function VecinalApp() {
         doc.setFontSize(8);
       }
       doc.setFont("helvetica", "bold");
-      doc.text(`${formatDate(movement.rawDate)} · ${movement.type === "charge" ? "CARGO" : "PAGO"} · ${movement.receipt || "Sin comprobante"}`, 18, y);
+      doc.text(`${formatDate(movement.rawDate)} · ${movementLabel(movement.type).toUpperCase()} · ${movement.receipt || "Sin comprobante"}`, 18, y);
       y += 4;
       doc.setFont("helvetica", "normal");
       const lines = doc.splitTextToSize(`${movement.concept} · ${movement.detail} · Cargo Bs ${formatBs(movement.charge)} · Pago Bs ${formatBs(movement.payment)} · Saldo Bs ${formatBs(movement.balance)}`, 175);
@@ -1228,36 +1232,6 @@ export default function VecinalApp() {
     }
     doc.save(`MOVIMIENTOS_${safeFilePart(neighbor.name)}_LOTE_${safeFilePart(neighbor.lot)}.pdf`);
     notify("Estado de cuenta PDF descargado");
-  }
-
-  async function downloadPaymentReceiptPdf(result: PaymentResult) {
-    const { jsPDF } = await import("jspdf");
-    const doc = new jsPDF({ unit: "mm", format: "letter", orientation: "portrait" });
-    doc.setTextColor(16, 42, 82);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(16);
-    doc.text("COMPROBANTE DE PAGO VECINAL", 20, 25);
-    doc.setFontSize(12);
-    doc.text(result.payment.receipt, 20, 35);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(10);
-    const lines = [
-      `Vecino: ${result.neighborName}`,
-      `Lote: ${result.neighborLot}`,
-      `Fecha: ${formatDate(result.date)}`,
-      `Concepto: ${result.concept}`,
-      `Método: ${result.method}`,
-      `Monto recibido: Bs ${formatBs(result.amount)}`,
-      `Saldo pendiente del concepto: Bs ${formatBs(result.remainingAfter)}`,
-      result.note ? `Observación: ${result.note}` : "",
-    ];
-    let y = 50;
-    for (const line of lines.filter(Boolean)) {
-      doc.text(doc.splitTextToSize(line, 170), 20, y);
-      y += 9;
-    }
-    doc.save(`COMPROBANTE_${safeFilePart(result.payment.receipt)}.pdf`);
-    notify("Comprobante descargado");
   }
 
   async function downloadMonthlySummary() {
@@ -1539,7 +1513,7 @@ export default function VecinalApp() {
               <button onClick={() => { setSection("vecinos"); setShowNeighborForm(true); }}><span>＋</span><strong>Nuevo vecino</strong><small>Registrar y crear QR</small></button>
               <button onClick={() => { setSection("actividades"); setEditingActivityId(null); setShowActivityForm(true); }}><span>◇</span><strong>Nueva actividad</strong><small>Reunión, trabajo o cuota</small></button>
               <button onClick={() => setSection("asistencia")}><span>✓</span><strong>Marcar faltas</strong><small>Generar lista de asistencia</small></button>
-              <button onClick={() => setSection("pagos")}><span>Bs</span><strong>Registrar pago</strong><small>Parcial o total</small></button>
+              <button onClick={() => setSection("pagos")}><span>Bs</span><strong>Ver historial</strong><small>Cargos, pagos y comprobantes</small></button>
             </div>
             <div className="summary-grid">
               <SummaryCard label="Vecinos activos" value={String(neighbors.filter((neighbor) => neighbor.active).length)} note="Con QR generado" tone="blue" />
@@ -1580,10 +1554,34 @@ export default function VecinalApp() {
                 <small role="status" aria-live="polite">{neighborSearch ? `${filteredNeighbors.length} ${filteredNeighbors.length === 1 ? "resultado" : "resultados"}` : "Escriba parte del nombre o el número de lote"}</small>
               </div>
               <div className="neighbor-cards">
-                {filteredNeighbors.map((neighbor) => <article className="neighbor-card" key={neighbor.id}><QrTile neighbor={neighbor} /><div><span className={`status-dot ${balanceOf(neighbor) ? "has-debt" : "clear"}`}>{balanceOf(neighbor) ? "Pendiente" : "Al día"}</span><h3>{neighbor.name}</h3><p>{neighbor.street} · Lote {neighbor.lot}</p><p>{neighbor.code}</p><div className="neighbor-actions"><button onClick={() => window.open(publicNeighborUrl(neighbor.token), "_blank", "noopener,noreferrer")}>Ver tarjeta</button><button onClick={() => openNeighborAccount(neighbor.id)}>Cuenta y pagos</button><button onClick={() => { setEditingNeighborId(neighbor.id); setShowNeighborForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="delete-action" onClick={() => void deleteNeighbor(neighbor)}>Eliminar</button></div></div></article>)}
+                {filteredNeighbors.map((neighbor) => <article className="neighbor-card" key={neighbor.id}><QrTile neighbor={neighbor} /><div><span className={`status-dot ${balanceOf(neighbor) ? "has-debt" : "clear"}`}>{balanceOf(neighbor) ? "Pendiente" : "Al día"}</span><h3>{neighbor.name}</h3><p>{neighbor.street} · Lote {neighbor.lot}</p><p>{neighbor.code}</p><div className="neighbor-actions"><button onClick={() => window.open(publicNeighborUrl(neighbor.token), "_blank", "noopener,noreferrer")}>Ver tarjeta</button><button onClick={() => openNeighborAccount(neighbor.id)}>Ver historial</button><button onClick={() => { setEditingNeighborId(neighbor.id); setShowNeighborForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="delete-action" onClick={() => void deleteNeighbor(neighbor)}>Eliminar</button></div></div></article>)}
                 {!neighbors.length && <div className="empty-state"><strong>Aún no hay vecinos.</strong><span>Pulse “Registrar vecino” para crear el primero y generar su QR.</span></div>}
                 {!!neighbors.length && !filteredNeighbors.length && <div className="empty-state"><strong>No se encontró ningún vecino.</strong><span>Revise el nombre o número de lote, o pulse “Limpiar búsqueda”.</span></div>}
               </div>
+            </section>
+          </div>
+        )}
+        {section === "padron" && (
+          <div className="admin-section">
+            <SectionIntro title="Padrón vecinal por calles" text="Revise cuántos vecinos y lotes hay en cada calle, encuentre cualquier registro y descargue el padrón completo o una calle por separado." />
+            <div className="summary-grid registry-summary">
+              <SummaryCard label="Tarjetas activas" value={String(activeNeighbors.length)} note="Vecinos con QR" tone="blue" />
+              <SummaryCard label="Calles registradas" value={String(registeredStreetCount)} note="Sin contar datos provisionales" tone="violet" />
+              <SummaryCard label="Lotes registrados" value={String(registeredLots.size)} note="Números únicos" tone="green" />
+              <SummaryCard label="Datos por completar" value={String(incompleteNeighborCount)} note="Falta calle o lote" tone={incompleteNeighborCount ? "amber" : "green"} />
+            </div>
+            <section className="admin-panel registry-panel">
+              <div className="panel-heading"><div><span>{registryMatches.length} registro(s) visible(s)</span><h2>Buscar en todo el padrón</h2></div><button className="yellow-action" onClick={() => downloadRegistryCsv()}>Descargar padrón CSV</button></div>
+              <div className="neighbor-search-bar registry-search-bar">
+                <label htmlFor="registry-search"><span>Nombre, calle, lote o código</span><input id="registry-search" type="search" value={registrySearch} onChange={(event) => setRegistrySearch(event.target.value)} placeholder="Ej. Cochabamba, Mamani, 438 o VEC-001" autoComplete="off" /></label>
+                {registrySearch && <button type="button" onClick={() => setRegistrySearch("")}>Limpiar búsqueda</button>}
+                <small role="status" aria-live="polite">{registrySearch ? `${registryMatches.length} resultado(s)` : "El padrón se agrupa automáticamente por calle"}</small>
+              </div>
+              <div className="street-stat-grid">
+                {streetGroups.map((group) => <article className="street-stat-card" key={searchableText(group.name)}><div><span>Calle o avenida</span><h3>{group.name}</h3><p>{group.neighbors.length} {group.neighbors.length === 1 ? "vecino" : "vecinos"} · {new Set(group.neighbors.map((neighbor) => normalizedLotKey(neighbor.lot)).filter((lot) => lot && lot !== "—")).size} lote(s)</p></div><button type="button" onClick={() => downloadRegistryCsv(group.neighbors, group.name)}>Descargar</button></article>)}
+                {!streetGroups.length && <div className="empty-state compact-empty"><strong>No hay resultados.</strong><span>Revise la búsqueda o complete la calle de los vecinos.</span></div>}
+              </div>
+              {!!registryMatches.length && <div className="responsive-table registry-table"><table><thead><tr><th>Código</th><th>Vecino</th><th>Calle o avenida</th><th>Lote</th><th>Teléfono</th></tr></thead><tbody>{registryMatches.map((neighbor) => <tr key={neighbor.id}><td>{neighbor.code}</td><td><strong>{neighbor.name}</strong></td><td>{neighbor.street}</td><td>{neighbor.lot}</td><td>{neighbor.phone || "—"}</td></tr>)}</tbody></table></div>}
             </section>
           </div>
         )}
@@ -1618,26 +1616,28 @@ export default function VecinalApp() {
             <div className="activity-list">{activities.map((activity) => {
               const category = activityCategoryFromRowIndex(activity.cardRowIndex);
               const contribution = category.kind === "contribution";
-              return <article key={activity.id}><div className="activity-date"><strong>{new Date(`${activity.date}T00:00:00`).getUTCDate()}</strong><span>{new Intl.DateTimeFormat("es-BO", { month: "short", timeZone: "UTC" }).format(new Date(`${activity.date}T00:00:00Z`))}</span></div><div className="activity-main"><span>{category.label} · {activity.code}</span><h3>{activity.title}</h3><p>{contribution ? "Cuota configurada" : "Multa configurada"}: <strong>Bs {formatBs(activity.fine)}</strong>{category.id === "otros" && <> · {activity.type}</>}</p></div><span className={`activity-status ${activity.status === "Cerrada" ? "closed" : "scheduled"}`}>{activity.status}</span><div className="activity-actions"><button className="ghost-action" onClick={() => { const suggestion = suggestedCategoryForActivity(activity); setEditingActivityId(activity.id); setActivityFormCategory(suggestion?.id ?? category.id); setShowActivityForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="ghost-action" onClick={() => { setSelectedActivity(activity.id); setSection("asistencia"); }}>{contribution ? "Definir cuota →" : category.id === "trabajos" ? "Cumplimiento →" : "Asistencia →"}</button></div></article>;
+              return <article key={activity.id}><div className="activity-date"><strong>{new Date(`${activity.date}T00:00:00`).getUTCDate()}</strong><span>{new Intl.DateTimeFormat("es-BO", { month: "short", timeZone: "UTC" }).format(new Date(`${activity.date}T00:00:00Z`))}</span></div><div className="activity-main"><span>{category.label} · {activity.code}</span><h3>{activity.title}</h3><p>{contribution ? "Cuota configurada" : "Multa configurada"}: <strong>Bs {formatBs(activity.fine)}</strong>{category.id === "otros" && <> · {activity.type}</>}</p></div><span className={`activity-status ${activity.status === "Cerrada" ? "closed" : "scheduled"}`}>{activity.status}</span><div className="activity-actions"><button className="ghost-action" onClick={() => { const suggestion = suggestedCategoryForActivity(activity); setEditingActivityId(activity.id); setActivityFormCategory(suggestion?.id ?? category.id); setShowActivityForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="ghost-action" onClick={() => { setSelectedActivity(activity.id); setSection("asistencia"); }}>{contribution ? "Registrar pagos →" : category.id === "trabajos" ? "Cumplimiento →" : "Asistencia →"}</button><button className="delete-action" onClick={() => void deleteActivity(activity)}>Eliminar</button></div></article>;
             })}{!activities.length && <div className="empty-state"><strong>Aún no hay actividades.</strong><span>Cree una asamblea, cuota, trabajo u otro evento para comenzar.</span></div>}</div>
           </div>
         )}
         {section === "asistencia" && (
           <div className="admin-section">
-            <SectionIntro title={selectedActivityIsContribution ? "Definir estado de la cuota" : "Registrar asistencia o cumplimiento"} text={selectedActivityIsContribution ? "Aquí solo indique si la cuota queda pendiente o el vecino está exento. Todo dinero recibido se registra en Pagos para crear comprobante y movimiento." : "Revise cada vecino y marque si asistió, realizó la actividad o quedó pendiente."} />
+            <SectionIntro title={selectedActivityIsContribution ? "Registrar quién pagó" : "Registrar asistencia o cumplimiento"} text={selectedActivityIsContribution ? "Marque Pagó o No pagó. Al guardar, el monto completo se registra automáticamente en el historial; no existen pagos incompletos." : "Revise cada vecino. Si una falta con multa fue pagada, marque Regularizó para guardar automáticamente el movimiento completo."} />
             {!selectedActivityData ? <div className="empty-state"><strong>Primero debe crear una actividad.</strong><span>Después podrá marcar presentes, faltas o justificaciones.</span></div> : (
               <section className="admin-panel attendance-panel"><div className="attendance-select"><label>Registro<select value={selectedActivity} onChange={(event) => setSelectedActivity(Number(event.target.value))}>{activities.map((activity) => <option key={activity.id} value={activity.id}>{activityCategoryFromRowIndex(activity.cardRowIndex).label} · {activity.title}</option>)}</select></label><div><span>{selectedActivityIsContribution ? "Monto de la cuota" : "Multa configurada"}</span><strong>Bs {formatBs(selectedActivityData.fine)}</strong><small>{selectedActivityCategory.label}</small></div></div>
-                <div className="status-meaning-note"><strong>{selectedActivityIsContribution ? "Control de cuota" : "Control de actividad"}</strong><span>{selectedActivityIsContribution ? "× pendiente · — exento · El dinero se registra en Pagos" : "✓ confirmado · × pendiente · — justificado"}</span></div>
-                <div className="attendance-list">{neighbors.map((neighbor) => { const currentStatus = selectedAttendance[neighbor.id] ?? (selectedActivityIsContribution ? "Faltó" : "Presente"); const rowOptions = selectedActivityIsContribution ? [...(currentStatus === "Presente" ? [{ value: "Presente" as AttendanceStatus, label: "✓ Pagado anteriormente" }] : []), ...selectedStatusOptions] : selectedStatusOptions; return <article key={neighbor.id}><div className="avatar">{neighbor.name.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div className="attendance-name"><strong>{neighbor.name}</strong><span>Lote {neighbor.lot} · {neighbor.code}</span></div><div className="attendance-buttons">{rowOptions.map((option) => <button type="button" key={option.value} className={currentStatus === option.value ? `selected ${option.value.toLowerCase().replace("ó", "o")}` : ""} onClick={() => setAttendanceByActivity((current) => ({ ...current, [selectedActivity]: { ...(current[selectedActivity] ?? {}), [neighbor.id]: option.value } }))}>{option.label}</button>)}</div></article>; })}</div>
+                <div className="status-meaning-note"><strong>{selectedActivityIsContribution ? "Control de cuota" : "Control de actividad"}</strong><span>{selectedActivityIsContribution ? "✓ pagó · × no pagó · — exento" : "✓ cumplió · × pendiente · ✓ regularizó · — justificado"}</span></div>
+                <div className="bulk-control-actions"><div><strong>Atajo para listas grandes</strong><span>Marque a todos y luego corrija únicamente las excepciones.</span></div><div>{selectedStatusOptions.filter((option) => option.value === "Presente" || option.value === "Faltó").map((option) => <button type="button" key={`all-${option.value}`} onClick={() => setAllControlStatus(option.value)}>Todos: {option.label.replace(/^.[ ]*/, "")}</button>)}<button type="button" className="clear-bulk" onClick={() => setAllControlStatus("Sin registrar")}>Limpiar selección</button></div></div>
+                <div className="neighbor-search-bar control-search-bar"><label htmlFor="control-search"><span>Buscar dentro de la lista</span><input id="control-search" type="search" value={controlSearch} onChange={(event) => setControlSearch(event.target.value)} placeholder="Nombre, calle, lote o código" autoComplete="off" /></label>{controlSearch && <button type="button" onClick={() => setControlSearch("")}>Mostrar todos</button>}<small>{controlSearch ? `${controlNeighbors.length} de ${activeNeighbors.length} vecino(s)` : `${activeNeighbors.length} vecino(s) en este control`}</small></div>
+                <div className="attendance-list">{controlNeighbors.map((neighbor) => { const currentStatus = selectedAttendance[neighbor.id] ?? "Sin registrar"; return <article className={currentStatus === "Sin registrar" ? "unregistered" : ""} key={neighbor.id}><div className="avatar">{neighbor.name.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div className="attendance-name"><strong>{neighbor.name}</strong><span>Lote {neighbor.lot} · {neighbor.code}{currentStatus === "Sin registrar" ? " · Falta elegir" : ""}</span></div><div className="attendance-buttons">{selectedStatusOptions.map((option) => <button type="button" key={option.value} className={currentStatus === option.value ? `selected ${option.value.toLowerCase().replace("ó", "o")}` : ""} onClick={() => setAttendanceByActivity((current) => ({ ...current, [selectedActivity]: { ...(current[selectedActivity] ?? {}), [neighbor.id]: option.value } }))}>{option.label}</button>)}</div></article>; })}</div>
                 {!neighbors.length && <div className="empty-state"><strong>No hay vecinos activos.</strong><span>Registre vecinos antes de guardar asistencia.</span></div>}
-                <div className="attendance-footer"><p><strong>{selectedPendingCount} {selectedActivityIsContribution ? "cuota(s) pendiente(s)" : "registro(s) pendiente(s)"}</strong> · Revise antes de confirmar.</p><button className="primary-action" disabled={!neighbors.length} onClick={() => void saveAttendance()}>{selectedActivityIsContribution ? "Guardar estados de cuota" : "Guardar control y actualizar tarjeta"}</button></div>
+                <div className="attendance-footer"><p><strong>{selectedUnregisteredCount ? `${selectedUnregisteredCount} falta(n) por elegir` : `${selectedPendingCount} registro(s) con ×`}</strong> · ✓ guardará el pago completo y el historial automáticamente.</p><button className="primary-action" disabled={!activeNeighbors.length || selectedUnregisteredCount > 0} onClick={() => void saveAttendance()}>{selectedUnregisteredCount ? "Complete toda la lista" : "Guardar control, historial y tarjeta"}</button></div>
               </section>
             )}
           </div>
         )}
         {section === "pagos" && (
           <div className="admin-section">
-            <SectionIntro title="Cuenta y pagos" text="Seleccione al vecino, elija la deuda exacta y registre un pago total o parcial. Cada pago conserva su comprobante y aparece en sus movimientos." />
+            <SectionIntro title="Historial de movimientos" text="Los cargos y pagos completos se guardan automáticamente desde Control por vecino. Aquí puede buscar, revisar y descargar el historial de cada persona." />
             <section className="admin-panel payment-neighbor-panel">
               <div className="panel-heading"><div><span>Paso 1</span><h2>Buscar vecino</h2></div><button onClick={downloadIncomeLedgerCsv}>Descargar libro general CSV</button></div>
               <div className="payment-neighbor-fields">
@@ -1645,37 +1645,18 @@ export default function VecinalApp() {
                 <label>Vecino<select value={selectedPaymentNeighborId ?? ""} onChange={(event) => choosePaymentNeighbor(event.target.value ? Number(event.target.value) : null)}><option value="">Seleccione un vecino</option>{paymentNeighborOptions.map((neighbor) => <option key={neighbor.id} value={neighbor.id}>{neighbor.code} · {neighbor.name} · Lote {neighbor.lot}</option>)}</select></label>
               </div>
             </section>
-            {!neighbors.length ? <div className="empty-state payment-empty"><strong>No hay vecinos registrados.</strong><span>Registre al primer vecino antes de guardar un pago.</span></div> : !selectedPaymentNeighbor ? <div className="empty-state payment-empty"><strong>Seleccione un vecino para abrir su cuenta.</strong><span>Verá sus conceptos pendientes, pagos y saldo actualizado.</span></div> : <>
+            {!neighbors.length ? <div className="empty-state payment-empty"><strong>No hay vecinos registrados.</strong><span>Registre al primer vecino para comenzar.</span></div> : !selectedPaymentNeighbor ? <div className="empty-state payment-empty"><strong>Seleccione un vecino para abrir su historial.</strong><span>Verá todos sus cargos, pagos y resultados guardados.</span></div> : <>
               <div className="summary-grid payment-account-summary">
                 <SummaryCard label="Generado" value={`Bs ${formatBs(selectedPaymentNeighbor.generated)}`} note="Cargos registrados" tone="blue" />
                 <SummaryCard label="Pagado" value={`Bs ${formatBs(selectedPaymentNeighbor.paid)}`} note="Dinero recibido" tone="green" />
                 <SummaryCard label="Saldo" value={`Bs ${formatBs(balanceOf(selectedPaymentNeighbor))}`} note={balanceOf(selectedPaymentNeighbor) ? "Pendiente" : "Al día"} tone={balanceOf(selectedPaymentNeighbor) ? "amber" : "green"} />
               </div>
-              {lastPayment && <section className="payment-success" role="status"><div><span>✓</span><div><strong>Pago guardado · {lastPayment.payment.receipt}</strong><p>{lastPayment.neighborName} · {lastPayment.concept} · Bs {formatBs(lastPayment.amount)}</p><small>Este concepto quedó con Bs {formatBs(lastPayment.remainingAfter)} pendientes.</small></div></div><button onClick={() => void downloadPaymentReceiptPdf(lastPayment)}>Descargar comprobante</button></section>}
-              <div className="payment-workspace">
-                <section className="admin-panel payment-concepts-panel">
-                  <div className="panel-heading"><div><span>Paso 2</span><h2>Conceptos pendientes</h2></div><b>{pendingPaymentConcepts.length}</b></div>
-                  <div className="payment-concept-list">{pendingPaymentConcepts.map((concept) => <label className={`payment-concept ${selectedPaymentActivityId === concept.activityId ? "selected" : ""}`} key={concept.activityId}><input type="radio" name="payment-concept" checked={selectedPaymentActivityId === concept.activityId} onChange={() => choosePaymentConcept(concept)} /><span><strong>{concept.detail}</strong><small>{concept.concept} · {concept.date}</small></span><span className="concept-money"><small>Original Bs {formatBs(concept.original)}</small><small>Abonado Bs {formatBs(concept.paidAmount)}</small><b>Resta Bs {formatBs(concept.remaining)}</b></span></label>)}</div>
-                  {!pendingPaymentConcepts.length && <div className="empty-state compact-empty"><strong>Este vecino está al día.</strong><span>Puede revisar o descargar sus movimientos abajo.</span></div>}
-                </section>
-                <section className="admin-panel payment-entry-panel">
-                  <div className="panel-heading"><div><span>Paso 3</span><h2>Registrar dinero recibido</h2></div></div>
-                  <form className="payment-entry-form" onSubmit={reviewPayment}>
-                    <div className="selected-concept-summary"><span>Concepto elegido</span><strong>{selectedPaymentConcept?.detail ?? "Seleccione un concepto pendiente"}</strong>{selectedPaymentConcept && <small>Saldo del concepto: Bs {formatBs(selectedPaymentConcept.remaining)}</small>}</div>
-                    <div className="payment-mode" role="group" aria-label="Tipo de pago"><button type="button" className={paymentMode === "full" ? "active" : ""} aria-pressed={paymentMode === "full"} onClick={() => changePaymentMode("full")}>Pagar todo</button><button type="button" className={paymentMode === "partial" ? "active" : ""} aria-pressed={paymentMode === "partial"} onClick={() => changePaymentMode("partial")}>Pago parcial</button></div>
-                    <label>Monto recibido Bs<input type="number" min="0.01" step="0.01" max={selectedPaymentConcept?.remaining} value={paymentAmount} onChange={(event) => setPaymentAmount(event.target.value)} readOnly={paymentMode === "full"} required /></label>
-                    <div className="payment-two-fields"><label>Método<select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as PaymentMethod)}><option>Efectivo</option><option>QR bancario</option><option>Transferencia</option><option>Otro</option></select></label><label>Fecha<input type="date" value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} required /></label></div>
-                    <label>Observación opcional<input value={paymentNote} maxLength={240} onChange={(event) => setPaymentNote(event.target.value)} placeholder="Ej. Entregó el tesorero" /></label>
-                    <button className="primary-action" disabled={!selectedPaymentConcept}>Revisar antes de guardar</button>
-                  </form>
-                </section>
-              </div>
+              <section className="automatic-control-help"><div><span>✓</span><div><strong>Registro automático, sin pagos parciales</strong><p>Para cambiar un resultado, abra “Control por vecino”, elija la actividad y marque Pagó, No pagó, Asistió, No asistió o Regularizó.</p></div></div><button onClick={() => setSection("asistencia")}>Ir al control →</button></section>
               <section className="admin-panel account-movements">
                 <div className="panel-heading"><div><span>{selectedAccountMovements.length} movimientos</span><h2>Movimientos de {selectedPaymentNeighbor.name}</h2></div><div className="movement-actions"><button onClick={() => downloadNeighborMovementsCsv(selectedPaymentNeighbor, selectedAccountMovements)}>Descargar CSV</button><button onClick={() => void downloadNeighborMovementsPdf(selectedPaymentNeighbor, selectedAccountMovements)}>Descargar PDF</button></div></div>
-                {selectedAccountMovements.length ? <div className="responsive-table"><table><thead><tr><th>Fecha</th><th>Movimiento</th><th>Concepto</th><th>Comprobante</th><th>Cargo</th><th>Pago</th><th>Saldo</th></tr></thead><tbody>{selectedAccountMovements.map((movement) => <tr key={movement.key}><td>{formatDate(movement.rawDate)}</td><td><span className={`movement-kind ${movement.type}`}>{movement.type === "charge" ? "Cargo" : "Pago"}</span></td><td><strong>{movement.concept}</strong><small>{movement.detail}</small></td><td>{movement.receipt || "—"}</td><td>{movement.charge ? `Bs ${formatBs(movement.charge)}` : "—"}</td><td>{movement.payment ? <span className="paid-pill">Bs {formatBs(movement.payment)}</span> : "—"}</td><td><strong>Bs {formatBs(movement.balance)}</strong></td></tr>)}</tbody></table></div> : <div className="empty-state compact-empty"><strong>Aún no hay movimientos.</strong><span>Los cargos y pagos aparecerán aquí.</span></div>}
+                {selectedAccountMovements.length ? <div className="responsive-table"><table><thead><tr><th>Fecha</th><th>Movimiento</th><th>Concepto</th><th>Comprobante</th><th>Cargo</th><th>Pago</th><th>Saldo</th></tr></thead><tbody>{selectedAccountMovements.map((movement) => <tr key={movement.key}><td>{formatDate(movement.rawDate)}</td><td><span className={`movement-kind ${movement.type}`}>{movementLabel(movement.type)}</span></td><td><strong>{movement.concept}</strong><small>{movement.detail}</small></td><td>{movement.receipt || "—"}</td><td>{movement.charge ? `Bs ${formatBs(movement.charge)}` : "—"}</td><td>{movement.payment ? <span className="paid-pill">Bs {formatBs(movement.payment)}</span> : "—"}</td><td><strong>Bs {formatBs(movement.balance)}</strong></td></tr>)}</tbody></table></div> : <div className="empty-state compact-empty"><strong>Aún no hay movimientos.</strong><span>Los estados, cargos y pagos aparecerán aquí.</span></div>}
               </section>
             </>}
-            {paymentDraft && <div className="cell-dialog-backdrop"><section className="cell-dialog payment-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-payment-title"><button className="dialog-close" type="button" aria-label="Cerrar" onClick={() => setPaymentDraft(null)}>×</button><div className="dialog-status done">Bs</div><span>Confirmar pago</span><h2 id="confirm-payment-title">Revise antes de guardar</h2><p>El comprobante quedará registrado y no debe duplicarse.</p><dl><div><dt>Vecino</dt><dd>{paymentDraft.neighborName} · Lote {paymentDraft.neighborLot}</dd></div><div><dt>Concepto</dt><dd>{paymentDraft.concept}</dd></div><div><dt>Monto</dt><dd>Bs {formatBs(paymentDraft.amount)}</dd></div><div><dt>Quedará pendiente</dt><dd>Bs {formatBs(Math.max(0, paymentDraft.remainingBefore - paymentDraft.amount))}</dd></div><div><dt>Fecha</dt><dd>{formatDate(paymentDraft.date)}</dd></div><div><dt>Método</dt><dd>{paymentDraft.method}</dd></div></dl><div className="payment-confirm-actions"><button className="cancel-action" type="button" disabled={paymentSaving} onClick={() => setPaymentDraft(null)}>Corregir</button><button className="primary-action" type="button" disabled={paymentSaving} onClick={() => void confirmPayment()}>{paymentSaving ? "Guardando…" : "Confirmar y guardar"}</button></div></section></div>}
           </div>
         )}
         {section === "vistas" && (
@@ -1759,7 +1740,7 @@ export default function VecinalApp() {
         {section === "reportes" && (
           <div className="admin-section">
             <SectionIntro title="Reportes y respaldos" text="Descargue documentos listos para imprimir y copias editables para su archivo mensual." />
-            <div className="report-grid"><article className="report-card featured"><span>QR</span><h2>Todos los QR de vecinos</h2><p>Hoja carta con hasta 30 etiquetas por página. Cada recuadro mide aproximadamente 3,8 × 3,7 cm e incluye un QR de 3 × 3 cm con solamente el nombre.</p><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR grandes</button></article><article className="report-card"><span>CSV</span><h2>Reporte de deudores</h2><p>Listado actualizado de vecinos con saldo pendiente.</p><button onClick={downloadDebtorsCsv}>Descargar deudores</button></article><article className="report-card"><span>Bs</span><h2>Libro general de ingresos</h2><p>Todos los pagos, comprobantes, vecinos, conceptos y métodos registrados.</p><button onClick={downloadIncomeLedgerCsv}>Descargar ingresos CSV</button></article><article className="report-card"><span>PDF</span><h2>Resumen mensual</h2><p>Actividades, multas generadas y pagos del mes actual.</p><button onClick={() => void downloadMonthlySummary()}>Generar resumen</button></article><article className="report-card"><span>↺</span><h2>Respaldo completo</h2><p>Copia de vecinos, actividades, asistencias, pagos, avisos y configuración.</p><button onClick={downloadFullBackup}>Descargar respaldo</button></article></div>
+            <div className="report-grid"><article className="report-card featured"><span>QR</span><h2>Todos los QR de vecinos</h2><p>Hoja carta con hasta 35 etiquetas por página. Cada recuadro mide exactamente 3,7 cm de ancho × 3,8 cm de alto; el QR ocupa casi todo el espacio y solo lleva el nombre pequeño debajo.</p><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR grandes</button></article><article className="report-card"><span>CSV</span><h2>Reporte de deudores</h2><p>Listado actualizado de vecinos con saldo pendiente.</p><button onClick={downloadDebtorsCsv}>Descargar deudores</button></article><article className="report-card"><span>Bs</span><h2>Libro general de ingresos</h2><p>Todos los pagos, comprobantes, vecinos, conceptos y métodos registrados.</p><button onClick={downloadIncomeLedgerCsv}>Descargar ingresos CSV</button></article><article className="report-card"><span>▦</span><h2>Padrón completo</h2><p>Vecinos, calles, lotes, teléfonos y códigos en una tabla editable.</p><button onClick={() => downloadRegistryCsv()}>Descargar padrón CSV</button></article><article className="report-card"><span>PDF</span><h2>Resumen mensual</h2><p>Actividades, multas generadas y pagos del mes actual.</p><button onClick={() => void downloadMonthlySummary()}>Generar resumen</button></article><article className="report-card"><span>↺</span><h2>Respaldo completo</h2><p>Copia de vecinos, actividades, asistencias, pagos, avisos y configuración.</p><button onClick={downloadFullBackup}>Descargar respaldo</button></article></div>
             <div className="backup-status"><div className="backup-check">✓</div><div><strong>Datos protegidos</strong><p>La base principal está en Cloudflare D1 y el respaldo se descarga en formato JSON.</p></div><span>Gestión {viewLabels.managementYear}</span></div>
           </div>
         )}

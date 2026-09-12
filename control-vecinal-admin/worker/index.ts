@@ -1,4 +1,4 @@
-import { POST as createActivity, PATCH as updateActivity } from "../app/api/admin/activities/route";
+import { DELETE as deleteActivity, POST as createActivity, PATCH as updateActivity } from "../app/api/admin/activities/route";
 import { PUT as saveAttendance } from "../app/api/admin/attendance/route";
 import { DELETE as deleteNeighbor, PATCH as updateNeighbor, POST as createNeighbor } from "../app/api/admin/neighbors/route";
 import { PUT as saveNotice } from "../app/api/admin/notice/route";
@@ -27,6 +27,7 @@ const handlers: Record<string, Handler | undefined> = {
   "DELETE /api/admin/neighbors": deleteNeighbor,
   "POST /api/admin/activities": createActivity,
   "PATCH /api/admin/activities": updateActivity,
+  "DELETE /api/admin/activities": deleteActivity,
   "PUT /api/admin/attendance": saveAttendance,
   "POST /api/admin/payments": createPayment,
   "PUT /api/admin/notice": saveNotice,

@@ -1,7 +1,7 @@
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { getD1, getDb } from "../../../../db";
 import { ensureDatabase } from "../../../../db/init";
-import { activities, attendanceRecords, auditLog } from "../../../../db/schema";
+import { activities, auditLog } from "../../../../db/schema";
 import { allocatePayments } from "../../../../lib/payment-ledger";
 import { apiError, cleanText, moneyToCents, requireAdmin } from "../../_shared";
 
@@ -93,7 +93,7 @@ export async function PATCH(request: Request) {
     const amountCents = moneyToCents(body.fine);
     const d1 = getD1();
     const [chargeRows, paymentRows] = await Promise.all([
-      d1.prepare("SELECT activity_id AS activityId, neighbor_id AS neighborId, charge_cents AS amount FROM attendance_records WHERE charge_cents > 0 ORDER BY activity_id").all<{ activityId: number; neighborId: number; amount: number }>(),
+      d1.prepare("SELECT activity_id AS activityId, neighbor_id AS neighborId, status, charge_cents AS amount FROM attendance_records WHERE charge_cents > 0 ORDER BY activity_id").all<{ activityId: number; neighborId: number; status: string; amount: number }>(),
       d1.prepare("SELECT neighbor_id AS neighborId, receipt, amount_cents AS amount FROM payments ORDER BY id").all<{ neighborId: number; receipt: string; amount: number }>(),
     ]);
     const neighborIds = new Set((chargeRows.results ?? []).filter((row) => row.activityId === id).map((row) => row.neighborId));
@@ -102,14 +102,62 @@ export async function PATCH(request: Request) {
         (chargeRows.results ?? []).filter((row) => row.neighborId === neighborId).map((row) => ({ activityId: row.activityId, amount: row.amount, order: row.activityId })),
         (paymentRows.results ?? []).filter((row) => row.neighborId === neighborId).map((row) => ({ receipt: row.receipt, amount: row.amount })),
       ).find((item) => item.activityId === id);
-      if ((allocation?.paid ?? 0) > amountCents) {
+      const targetRecord = (chargeRows.results ?? []).find((row) => row.activityId === id && row.neighborId === neighborId);
+      const proposedCharge = cardRowIndex === 1 || cardRowIndex === 2
+        ? targetRecord?.status === "Justificado" ? 0 : amountCents
+        : targetRecord?.status === "Faltó" ? amountCents : 0;
+      if ((allocation?.paid ?? 0) > proposedCharge) {
         return Response.json({ error: "El nuevo monto es menor que los pagos ya registrados para esta actividad" }, { status: 409 });
       }
     }
     const [activity] = await db.update(activities).set({ type, title, date, amountCents, cardRowIndex, cardSlotIndex, updatedAt: new Date().toISOString() }).where(eq(activities.id, id)).returning();
     if (!activity) return Response.json({ error: "Actividad no encontrada" }, { status: 404 });
-    await db.update(attendanceRecords).set({ chargeCents: amountCents, updatedAt: new Date().toISOString() }).where(and(eq(attendanceRecords.activityId, id), eq(attendanceRecords.status, "Faltó")));
+    await d1.prepare(`
+      UPDATE attendance_records
+      SET charge_cents = CASE
+        WHEN ? IN (1, 2) THEN CASE WHEN status = 'Justificado' THEN 0 ELSE ? END
+        ELSE CASE WHEN status = 'Faltó' THEN ? ELSE 0 END
+      END,
+      updated_at = ?
+      WHERE activity_id = ?
+    `).bind(cardRowIndex, amountCents, amountCents, new Date().toISOString(), id).run();
     await db.insert(auditLog).values({ action: "update", entityType: "activity", entityId: String(id), actorEmail: access.identity ?? "", detailJson: JSON.stringify({ type, category, title, date, amountCents }) });
     return Response.json({ activity: { ...activity, fine: activity.amountCents / 100 } });
+  } catch (error) { return apiError(error); }
+}
+
+export async function DELETE(request: Request) {
+  const access = requireAdmin(request);
+  if (access.error) return access.error;
+  try {
+    const id = Number(new URL(request.url).searchParams.get("id"));
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      return Response.json({ error: "Actividad inválida" }, { status: 400 });
+    }
+    await ensureDatabase();
+    const db = getDb();
+    const [activity] = await db.select().from(activities).where(eq(activities.id, id)).limit(1);
+    if (!activity) return Response.json({ error: "Actividad no encontrada" }, { status: 404 });
+
+    const d1 = getD1();
+    const [attendanceCount, paymentCount] = await Promise.all([
+      d1.prepare("SELECT COUNT(*) AS total FROM attendance_records WHERE activity_id = ?").bind(id).first<{ total: number }>(),
+      d1.prepare("SELECT COUNT(*) AS total FROM payments WHERE receipt LIKE ?").bind(`%-A${id}`).first<{ total: number }>(),
+    ]);
+    if ((attendanceCount?.total ?? 0) > 0 || (paymentCount?.total ?? 0) > 0) {
+      return Response.json({
+        error: "Esta actividad ya tiene control o pagos registrados. No se eliminó para proteger el historial; puede editar su nombre, fecha o monto.",
+      }, { status: 409 });
+    }
+
+    await db.delete(activities).where(eq(activities.id, id));
+    await db.insert(auditLog).values({
+      action: "delete",
+      entityType: "activity",
+      entityId: String(id),
+      actorEmail: access.identity ?? "",
+      detailJson: JSON.stringify({ code: activity.code, type: activity.type, title: activity.title, date: activity.date }),
+    });
+    return Response.json({ ok: true, id });
   } catch (error) { return apiError(error); }
 }
