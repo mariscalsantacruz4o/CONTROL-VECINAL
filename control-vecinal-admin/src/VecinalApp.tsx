@@ -1,6 +1,6 @@
 "use client";
 
-import { CSSProperties, FormEvent, useEffect, useMemo, useState } from "react";
+import { CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type Neighbor = {
   id: number;
@@ -143,14 +143,33 @@ type AdminState = {
   };
 };
 
+type AttendanceSaveDelta = {
+  attendance?: AttendanceRecord[];
+  payments?: Payment[];
+  neighbors?: Neighbor[];
+  activities?: Activity[];
+  activity?: Partial<Activity> & { id: number };
+};
+
+type AttendanceSaveResult = AttendanceSaveDelta & {
+  ok: boolean;
+  operationId?: string;
+  absentCount?: number;
+  pendingCount: number;
+  generated: number;
+  paidCount: number;
+  paid: number;
+  changes?: AttendanceSaveDelta;
+};
+
 const defaultTheme: ThemeSettings = {
-  primary: "#102a52",
-  secondary: "#1d4e89",
-  success: "#16805b",
-  danger: "#b12727",
-  accent: "#f1b933",
-  background: "#eef3f8",
-  paper: "#faf9f4",
+  primary: "#4b3f72",
+  secondary: "#087f91",
+  success: "#727a16",
+  danger: "#a51e62",
+  accent: "#93451c",
+  background: "#eee9f5",
+  paper: "#fffdf8",
 };
 
 const defaultViewLabels: ViewLabels = {
@@ -451,6 +470,52 @@ function cardRowsFromRecords(activities: Activity[], attendance: AttendanceRecor
   return rows;
 }
 
+function controlStatusFromRecord(record: AttendanceRecord, activity?: Activity | null): ControlStatus {
+  if (isContributionActivity(activity)) {
+    if (record.status === "Justificado") return "Justificado";
+    return record.paymentStatus === "paid" ? "Presente" : "Faltó";
+  }
+  if (record.status === "Faltó" && record.paymentStatus === "paid") return "Regularizado";
+  return record.status;
+}
+
+function activityChargesFromRecords(activityRows: Activity[], attendanceRows: AttendanceRecord[]) {
+  return attendanceRows.flatMap<ActivityCharge>((record) => {
+    if (!record.charge) return [];
+    const activity = activityRows.find((item) => item.id === record.activityId);
+    if (!activity) return [];
+    return [{
+      neighborId: record.neighborId,
+      activityId: record.activityId,
+      concept: debtConceptForActivity(activity),
+      detail: activity.title,
+      date: formatDate(activity.date),
+      amount: record.charge,
+      category: activityCategoryFromRowIndex(activity.cardRowIndex).id,
+      sortDate: activity.date,
+    }];
+  });
+}
+
+function mergeAttendanceRows(currentRows: AttendanceRecord[], changedRows: AttendanceRecord[]) {
+  const merged = new Map(currentRows.map((record) => [`${record.activityId}:${record.neighborId}`, record]));
+  for (const record of changedRows) merged.set(`${record.activityId}:${record.neighborId}`, record);
+  return [...merged.values()];
+}
+
+function mergePaymentRows(currentRows: Payment[], changedRows: Payment[]) {
+  const merged = [...currentRows];
+  for (const payment of changedRows) {
+    const index = merged.findIndex((current) =>
+      (payment.id > 0 && current.id === payment.id)
+      || (Boolean(payment.receipt) && current.receipt === payment.receipt),
+    );
+    if (index >= 0) merged[index] = payment;
+    else merged.push(payment);
+  }
+  return merged;
+}
+
 async function apiRequest<T>(url: string, init?: RequestInit) {
   const response = await fetch(url, init);
   const contentType = response.headers.get("content-type") ?? "";
@@ -483,7 +548,7 @@ function QrTile({ neighbor }: { neighbor: Neighbor }) {
     import("qrcode").then((QRCode) => QRCode.toDataURL(publicUrl, {
       width: 280,
       margin: 1,
-      color: { dark: "#102a52", light: "#ffffff" },
+      color: { dark: "#4b3f72", light: "#ffffff" },
     })).then((url) => {
       if (active) setSrc(url);
     });
@@ -540,32 +605,35 @@ export default function VecinalApp() {
   const [toast, setToast] = useState("");
   const [adminLoading, setAdminLoading] = useState(true);
   const [adminError, setAdminError] = useState("");
+  const [savingAttendance, setSavingAttendance] = useState(false);
+  const saveAttendanceLockRef = useRef(false);
+  const attendanceOperationRef = useRef<{ signature: string; id: string } | null>(null);
 
-  const demoNeighbor = neighbors[0] ?? { id: 0, code: "", token: "", name: "SIN VECINO REGISTRADO", street: "", lot: "—", phone: "", generated: 0, paid: 0, active: false };
+  const activeNeighbors = useMemo(() => neighbors.filter((neighbor) => neighbor.active), [neighbors]);
+  const demoNeighbor = activeNeighbors[0] ?? { id: 0, code: "", token: "", name: "SIN VECINO REGISTRADO", street: "", lot: "—", phone: "", generated: 0, paid: 0, active: false };
   const demoBalance = balanceOf(demoNeighbor);
   const today = new Date().toISOString().slice(0, 10);
-  const totalGenerated = neighbors.reduce((total, neighbor) => total + neighbor.generated, 0);
-  const totalPaid = neighbors.reduce((total, neighbor) => total + neighbor.paid, 0);
+  const totalPaid = activeNeighbors.reduce((total, neighbor) => total + neighbor.paid, 0);
+  const totalBalance = activeNeighbors.reduce((total, neighbor) => total + balanceOf(neighbor), 0);
   const selectedActivityData = activities.find((activity) => activity.id === selectedActivity) ?? activities[0];
   const editingActivity = editingActivityId === null ? null : activities.find((activity) => activity.id === editingActivityId) ?? null;
   const editingNeighbor = editingNeighborId === null ? null : neighbors.find((neighbor) => neighbor.id === editingNeighborId) ?? null;
   const filteredNeighbors = useMemo(() => {
     const query = searchableText(neighborSearch);
-    if (!query) return neighbors;
-    return neighbors.filter((neighbor) =>
+    if (!query) return activeNeighbors;
+    return activeNeighbors.filter((neighbor) =>
       searchableText(neighbor.name).includes(query) || searchableText(neighbor.lot).includes(query)
     );
-  }, [neighborSearch, neighbors]);
+  }, [activeNeighbors, neighborSearch]);
   const duplicateLotGroups = useMemo(() => {
     const groups = new Map<string, Neighbor[]>();
-    for (const neighbor of neighbors) {
+    for (const neighbor of activeNeighbors) {
       const key = normalizedLotKey(neighbor.lot);
       if (!key || key === "—") continue;
       groups.set(key, [...(groups.get(key) ?? []), neighbor]);
     }
     return [...groups.values()].filter((group) => group.length > 1);
-  }, [neighbors]);
-  const activeNeighbors = useMemo(() => neighbors.filter((neighbor) => neighbor.active), [neighbors]);
+  }, [activeNeighbors]);
   const registeredLots = useMemo(() => new Set(activeNeighbors.map((neighbor) => normalizedLotKey(neighbor.lot)).filter((lot) => lot && lot !== "—")), [activeNeighbors]);
   const registeredStreetCount = useMemo(() => new Set(activeNeighbors.map((neighbor) => searchableText(neighbor.street)).filter((street) => street && street !== "por completar")).size, [activeNeighbors]);
   const incompleteNeighborCount = useMemo(() => activeNeighbors.filter((neighbor) => {
@@ -627,11 +695,11 @@ export default function VecinalApp() {
   }, [activeNeighbors, controlSearch]);
   const paymentNeighborOptions = useMemo(() => {
     const query = searchableText(paymentNeighborSearch);
-    const matches = !query ? neighbors : neighbors.filter((neighbor) => searchableText(`${neighbor.name} ${neighbor.lot} ${neighbor.code}`).includes(query));
-    const selected = neighbors.find((neighbor) => neighbor.id === selectedPaymentNeighborId);
+    const matches = !query ? activeNeighbors : activeNeighbors.filter((neighbor) => searchableText(`${neighbor.name} ${neighbor.lot} ${neighbor.code}`).includes(query));
+    const selected = activeNeighbors.find((neighbor) => neighbor.id === selectedPaymentNeighborId);
     return selected && !matches.some((neighbor) => neighbor.id === selected.id) ? [selected, ...matches] : matches;
-  }, [neighbors, paymentNeighborSearch, selectedPaymentNeighborId]);
-  const selectedPaymentNeighbor = neighbors.find((neighbor) => neighbor.id === selectedPaymentNeighborId) ?? null;
+  }, [activeNeighbors, paymentNeighborSearch, selectedPaymentNeighborId]);
+  const selectedPaymentNeighbor = activeNeighbors.find((neighbor) => neighbor.id === selectedPaymentNeighborId) ?? null;
   const selectedAccountMovements = useMemo(
     () => selectedPaymentNeighborId ? accountMovementsFor(selectedPaymentNeighborId, activityCharges, payments, attendanceRecords, activities) : [],
     [selectedPaymentNeighborId, activityCharges, payments, attendanceRecords, activities],
@@ -722,34 +790,11 @@ export default function VecinalApp() {
       }
       for (const record of state.attendance) {
         const activity = state.activities.find((item) => item.id === record.activityId);
-        const contribution = isContributionActivity(activity);
-        const controlStatus: ControlStatus = contribution
-          ? record.status === "Justificado"
-            ? "Justificado"
-            : record.paymentStatus === "paid"
-              ? "Presente"
-              : "Faltó"
-          : record.status === "Faltó" && record.paymentStatus === "paid"
-            ? "Regularizado"
-            : record.status;
+        const controlStatus = controlStatusFromRecord(record, activity);
         recordsByActivity[record.activityId] = { ...(recordsByActivity[record.activityId] ?? {}), [record.neighborId]: controlStatus };
       }
       setAttendanceByActivity(recordsByActivity);
-      setActivityCharges(state.attendance.flatMap<ActivityCharge>((record) => {
-        if (!record.charge) return [];
-        const activity = state.activities.find((item) => item.id === record.activityId);
-        if (!activity) return [];
-        return [{
-          neighborId: record.neighborId,
-          activityId: record.activityId,
-          concept: debtConceptForActivity(activity),
-          detail: activity.title,
-          date: formatDate(activity.date),
-          amount: record.charge,
-          category: activityCategoryFromRowIndex(activity.cardRowIndex).id,
-          sortDate: activity.date,
-        }];
-      }));
+      setActivityCharges(activityChargesFromRecords(state.activities, state.attendance));
       const firstActivityId = state.activities[0]?.id ?? 0;
       setSelectedActivity((current) => state.activities.some((activity) => activity.id === current) ? current : firstActivityId);
       if (state.neighbors[0]) setCardData(cardRowsFromRecords(state.activities, state.attendance, state.neighbors[0].id));
@@ -841,13 +886,14 @@ export default function VecinalApp() {
 
   async function deleteNeighbor(neighbor: Neighbor) {
     const confirmed = window.confirm(
-      `¿Eliminar a ${neighbor.name}, lote ${neighbor.lot}?\n\nTambién se eliminarán sus asistencias y pagos. Esta acción no se puede deshacer.`
+      `¿ELIMINAR DEFINITIVAMENTE a ${neighbor.name}, lote ${neighbor.lot}?\n\nSe borrarán también su QR, asistencias, deudas, pagos e historial. Dejará de aparecer en todos los conteos y esta acción no se puede deshacer.`
     );
     if (!confirmed) return;
     try {
       await apiRequest(`/api/admin/neighbors?id=${neighbor.id}`, { method: "DELETE" });
+      if (selectedPaymentNeighborId === neighbor.id) setSelectedPaymentNeighborId(null);
       await loadAdminState(false);
-      notify(`${neighbor.name} fue eliminado`);
+      notify(`${neighbor.name} y todos sus registros fueron eliminados`);
     } catch (error) {
       notify(error instanceof Error ? error.message : "No se pudo eliminar el vecino");
     }
@@ -946,13 +992,13 @@ export default function VecinalApp() {
 
   async function deleteActivity(activity: Activity) {
     const confirmed = window.confirm(
-      `¿Eliminar “${activity.title}”?\n\nSolo se eliminará si todavía no tiene control ni pagos. Los registros con historial quedan protegidos.`,
+      `¿ELIMINAR DEFINITIVAMENTE “${activity.title}”?\n\nSe borrarán también todos sus controles, deudas y pagos asociados. Desaparecerá de las tarjetas y reportes. Esta acción no se puede deshacer.`,
     );
     if (!confirmed) return;
     try {
       await apiRequest(`/api/admin/activities?id=${activity.id}`, { method: "DELETE" });
       await loadAdminState(false);
-      notify("Actividad vacía eliminada correctamente");
+      notify("Actividad y todos sus registros asociados fueron eliminados");
     } catch (error) {
       notify(error instanceof Error ? error.message : "No se pudo eliminar la actividad");
     }
@@ -997,54 +1043,89 @@ export default function VecinalApp() {
   }
 
   async function saveAttendance() {
+    if (saveAttendanceLockRef.current) return;
     if (!selectedActivityData) {
       notify("Primero cree una actividad");
       return;
     }
     const currentRecords = attendanceByActivity[selectedActivity] ?? {};
     const defaultStatus: ControlStatus = "Sin registrar";
-    const unregistered = neighbors.filter((neighbor) => neighbor.active && (currentRecords[neighbor.id] ?? defaultStatus) === "Sin registrar");
-    if (unregistered.length) {
-      notify(`Falta elegir un resultado para ${unregistered.length} vecino(s)`);
-      return;
-    }
     const selections = neighbors.filter((neighbor) => neighbor.active).map((neighbor) => currentRecords[neighbor.id] ?? defaultStatus);
     const confirmedCount = selections.filter((status) => status === "Presente").length;
     const regularizedCount = selections.filter((status) => status === "Regularizado").length;
     const pendingCount = selections.filter((status) => status === "Faltó").length;
     const exemptCount = selections.filter((status) => status === "Justificado").length;
     const paymentSelections = selectedActivityIsContribution ? confirmedCount : regularizedCount;
-    const confirmation = window.confirm(
-      `Revise antes de guardar “${selectedActivityData.title}”:\n\n✓ Confirmados: ${confirmedCount}\n✓ Regularizados: ${regularizedCount}\n× Pendientes: ${pendingCount}\n— Exentos o justificados: ${exemptCount}\n\n${paymentSelections ? `Se registrará el pago completo para ${paymentSelections} vecino(s).` : "No se crearán pagos nuevos."}\n\n¿Los datos son correctos?`,
+    const savedByNeighbor = new Map(
+      attendanceRecords
+        .filter((record) => record.activityId === selectedActivity)
+        .map((record) => [record.neighborId, record]),
     );
-    if (!confirmation) return;
+    const changedRecords = activeNeighbors.flatMap((neighbor) => {
+      const selectedStatus = currentRecords[neighbor.id] ?? defaultStatus;
+      if (selectedStatus === "Sin registrar") return [];
+      const savedRecord = savedByNeighbor.get(neighbor.id);
+      const savedStatus = savedRecord ? controlStatusFromRecord(savedRecord, selectedActivityData) : defaultStatus;
+      const expectedCharge = selectedActivityIsContribution
+        ? selectedStatus === "Justificado" ? 0 : selectedActivityData.fine
+        : selectedStatus === "Faltó" || selectedStatus === "Regularizado" ? selectedActivityData.fine : 0;
+      const chargeUnchanged = savedRecord ? Math.abs(savedRecord.charge - expectedCharge) < 0.005 : false;
+      if (savedStatus === selectedStatus && chargeUnchanged) return [];
+      return [{
+        neighborId: neighbor.id,
+        status: selectedStatus === "Regularizado" ? "Faltó" : selectedStatus,
+        settled: selectedStatus === "Regularizado" || (selectedActivityIsContribution && selectedStatus === "Presente"),
+        note: "",
+      }];
+    });
+    if (!changedRecords.length) {
+      notify("Todo ya estaba guardado; no se enviaron solicitudes nuevas");
+      return;
+    }
+    saveAttendanceLockRef.current = true;
+    const confirmation = window.confirm(
+      `Revise antes de guardar “${selectedActivityData.title}”:\n\n✓ Confirmados: ${confirmedCount}\n✓ Regularizados: ${regularizedCount}\n× Pendientes: ${pendingCount}\n— Exentos o justificados: ${exemptCount}\n\nSolo se enviarán ${changedRecords.length} cambio(s); los demás no se repetirán.\n${paymentSelections ? `Se registrará el pago completo cuando corresponda.` : "No se crearán pagos nuevos."}\n\n¿Los datos son correctos?`,
+    );
+    if (!confirmation) {
+      saveAttendanceLockRef.current = false;
+      return;
+    }
+    setSavingAttendance(true);
+    const operationSignature = JSON.stringify({ activityId: selectedActivity, records: changedRecords });
+    const previousOperation = attendanceOperationRef.current;
+    const operationId = previousOperation?.signature === operationSignature
+      ? previousOperation.id
+      : typeof window.crypto?.randomUUID === "function"
+        ? `attendance-${selectedActivity}-${window.crypto.randomUUID()}`
+        : `attendance-${selectedActivity}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    attendanceOperationRef.current = { signature: operationSignature, id: operationId };
     try {
-      const result = await apiRequest<{ pendingCount: number; generated: number; paidCount: number; paid: number }>("/api/admin/attendance", {
+      const result = await apiRequest<AttendanceSaveResult>("/api/admin/attendance", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           activityId: selectedActivity,
           recordedDate: today,
-          records: neighbors.filter((neighbor) => neighbor.active).map((neighbor) => ({
-            neighborId: neighbor.id,
-            status: (currentRecords[neighbor.id] ?? defaultStatus) === "Regularizado" ? "Faltó" : currentRecords[neighbor.id] ?? defaultStatus,
-            settled: (currentRecords[neighbor.id] ?? defaultStatus) === "Regularizado" || (selectedActivityIsContribution && (currentRecords[neighbor.id] ?? defaultStatus) === "Presente"),
-            note: "",
-          })),
+          operationId,
+          records: changedRecords,
         }),
       });
       await loadAdminState(false);
+      attendanceOperationRef.current = null;
       const paymentMessage = result.paidCount ? ` · ${result.paidCount} pago(s) guardado(s), Bs ${formatBs(result.paid)}` : "";
       notify(result.pendingCount
-        ? `${result.pendingCount} registro(s) con × pendiente(s)${paymentMessage}`
-        : `Control guardado sin pendientes${paymentMessage}`);
+        ? `${changedRecords.length} cambio(s) guardado(s) una sola vez · ${result.pendingCount} con ×${paymentMessage}`
+        : `${changedRecords.length} cambio(s) guardado(s) una sola vez${paymentMessage}`);
     } catch (error) {
       notify(error instanceof Error ? error.message : "No se pudo guardar la asistencia");
+    } finally {
+      saveAttendanceLockRef.current = false;
+      setSavingAttendance(false);
     }
   }
 
   function setAllControlStatus(status: ControlStatus) {
-    if (!selectedActivityData || !activeNeighbors.length) return;
+    if (savingAttendance || !selectedActivityData || !activeNeighbors.length) return;
     const label = selectedStatusOptions.find((option) => option.value === status)?.label ?? status;
     if (!window.confirm(`¿Aplicar “${label}” a los ${activeNeighbors.length} vecinos?\n\nDespués puede corregir casos individuales antes de guardar.`)) return;
     setAttendanceByActivity((current) => ({
@@ -1069,6 +1150,11 @@ export default function VecinalApp() {
     const occupiedHeight = rows * cardHeight + (rows - 1) * gapY;
     const startX = (doc.internal.pageSize.getWidth() - occupiedWidth) / 2;
     const startY = (doc.internal.pageSize.getHeight() - occupiedHeight) / 2;
+    const repeatedNameCounts = new Map<string, number>();
+    for (const neighbor of activeNeighbors) {
+      const key = searchableText(neighbor.name);
+      repeatedNameCounts.set(key, (repeatedNameCounts.get(key) ?? 0) + 1);
+    }
     for (let index = 0; index < activeNeighbors.length; index += 1) {
       const neighbor = activeNeighbors[index];
       if (index > 0 && index % cardsPerPage === 0) doc.addPage();
@@ -1110,8 +1196,15 @@ export default function VecinalApp() {
       }
       doc.setFont("helvetica", "bold");
       doc.setFontSize(4.5);
-      const nameLine = doc.splitTextToSize(neighbor.name.toUpperCase(), 35)[0] || neighbor.name.toUpperCase();
-      doc.text(nameLine, x + cardWidth / 2, y + 36.7, { align: "center" });
+      const fullName = neighbor.name.toUpperCase();
+      const nameLine = doc.splitTextToSize(fullName, 35)[0] || fullName;
+      const repeatedName = (repeatedNameCounts.get(searchableText(neighbor.name)) ?? 0) > 1;
+      doc.text(nameLine, x + cardWidth / 2, y + (repeatedName ? 35.8 : 36.7), { align: "center" });
+      if (repeatedName) {
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(3.5);
+        doc.text(neighbor.code, x + cardWidth / 2, y + 37.2, { align: "center" });
+      }
     }
     doc.save("QR_VECINOS_UV_4-O_2026.pdf");
     notify("PDF de QR descargado");
@@ -1127,7 +1220,7 @@ export default function VecinalApp() {
 
   function downloadDebtorsCsv() {
     const lines = ["Codigo,Nombre,Lote,Asambleas,Cuotas mensuales,Cuotas extras,Otros,Trabajos,Saldo total"];
-    neighbors.filter((neighbor) => balanceOf(neighbor) > 0).forEach((neighbor) => {
+    activeNeighbors.filter((neighbor) => balanceOf(neighbor) > 0).forEach((neighbor) => {
       const pending = outstandingDebtItems(activityCharges.filter((charge) => charge.neighborId === neighbor.id), neighbor.paid);
       const subtotal = (category: ActivityCategoryId) => pending.filter((item) => item.category === category).reduce((sum, item) => sum + item.amount, 0);
       lines.push([
@@ -1250,8 +1343,8 @@ export default function VecinalApp() {
     doc.text(`RESUMEN MENSUAL · ${monthLabel} ${year}`, 20, 30);
     doc.setFont("helvetica", "normal");
     doc.setFontSize(9);
-    doc.text(`Vecinos activos: ${neighbors.filter((neighbor) => neighbor.active).length}`, 20, 41);
-    doc.text(`Saldo total pendiente: Bs ${formatBs(totalGenerated - totalPaid)}`, 20, 47);
+    doc.text(`Vecinos activos: ${activeNeighbors.length}`, 20, 41);
+    doc.text(`Saldo total pendiente: Bs ${formatBs(totalBalance)}`, 20, 47);
     doc.text(`Total recaudado acumulado: Bs ${formatBs(totalPaid)}`, 20, 53);
     let y = 66;
     doc.setFont("helvetica", "bold");
@@ -1516,15 +1609,15 @@ export default function VecinalApp() {
               <button onClick={() => setSection("pagos")}><span>Bs</span><strong>Ver historial</strong><small>Cargos, pagos y comprobantes</small></button>
             </div>
             <div className="summary-grid">
-              <SummaryCard label="Vecinos activos" value={String(neighbors.filter((neighbor) => neighbor.active).length)} note="Con QR generado" tone="blue" />
+              <SummaryCard label="Vecinos activos" value={String(activeNeighbors.length)} note="Con QR generado" tone="blue" />
               <SummaryCard label="Actividades" value={String(activities.length)} note="Durante la gestión" tone="violet" />
-              <SummaryCard label="Por cobrar" value={`Bs ${formatBs(totalGenerated - totalPaid)}`} note="Saldo pendiente" tone="amber" />
+              <SummaryCard label="Por cobrar" value={`Bs ${formatBs(totalBalance)}`} note="Saldo pendiente" tone="amber" />
               <SummaryCard label="Recaudado" value={`Bs ${formatBs(totalPaid)}`} note="Pagos registrados" tone="green" />
             </div>
             <section className="admin-panel">
               <div className="panel-heading"><div><span>Seguimiento</span><h2>Vecinos con saldo pendiente</h2></div><button onClick={() => setSection("reportes")}>Ver reporte →</button></div>
               <div className="responsive-table"><table><thead><tr><th>Vecino</th><th>Lote</th><th>Generado</th><th>Pagado</th><th>Saldo</th></tr></thead><tbody>
-                {neighbors.filter((neighbor) => balanceOf(neighbor) > 0).map((neighbor) => <tr key={neighbor.id}><td><strong>{neighbor.name}</strong><small>{neighbor.code}</small></td><td>{neighbor.lot}</td><td>Bs {formatBs(neighbor.generated)}</td><td>Bs {formatBs(neighbor.paid)}</td><td><span className="debt-pill">Bs {formatBs(balanceOf(neighbor))}</span></td></tr>)}
+                {activeNeighbors.filter((neighbor) => balanceOf(neighbor) > 0).map((neighbor) => <tr key={neighbor.id}><td><strong>{neighbor.name}</strong><small>{neighbor.code}</small></td><td>{neighbor.lot}</td><td>Bs {formatBs(neighbor.generated)}</td><td>Bs {formatBs(neighbor.paid)}</td><td><span className="debt-pill">Bs {formatBs(balanceOf(neighbor))}</span></td></tr>)}
               </tbody></table></div>
             </section>
           </div>
@@ -1546,7 +1639,7 @@ export default function VecinalApp() {
               </form>
             )}
             <section className="admin-panel">
-              <div className="panel-heading"><div><span>{neighborSearch ? `${filteredNeighbors.length} de ${neighbors.length} registros` : `${neighbors.length} registros`}</span><h2>Directorio vecinal</h2></div><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR</button></div>
+              <div className="panel-heading"><div><span>{neighborSearch ? `${filteredNeighbors.length} de ${activeNeighbors.length} registros` : `${activeNeighbors.length} registros`}</span><h2>Directorio vecinal</h2></div><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR</button></div>
               {!!duplicateLotGroups.length && <div className="duplicate-lot-warning" role="alert"><strong>Hay lotes repetidos de registros anteriores.</strong><span>Revise y corrija: {duplicateLotGroups.map((group) => group[0].lot).join(", ")}. El sistema ya no permitirá crear nuevos duplicados.</span></div>}
               <div className="neighbor-search-bar">
                 <label htmlFor="neighbor-search"><span>Buscar vecino por nombre o lote</span><input id="neighbor-search" type="search" value={neighborSearch} onChange={(event) => setNeighborSearch(event.target.value)} placeholder="Ej. Mamani o 307" autoComplete="off" /></label>
@@ -1555,8 +1648,8 @@ export default function VecinalApp() {
               </div>
               <div className="neighbor-cards">
                 {filteredNeighbors.map((neighbor) => <article className="neighbor-card" key={neighbor.id}><QrTile neighbor={neighbor} /><div><span className={`status-dot ${balanceOf(neighbor) ? "has-debt" : "clear"}`}>{balanceOf(neighbor) ? "Pendiente" : "Al día"}</span><h3>{neighbor.name}</h3><p>{neighbor.street} · Lote {neighbor.lot}</p><p>{neighbor.code}</p><div className="neighbor-actions"><button onClick={() => window.open(publicNeighborUrl(neighbor.token), "_blank", "noopener,noreferrer")}>Ver tarjeta</button><button onClick={() => openNeighborAccount(neighbor.id)}>Ver historial</button><button onClick={() => { setEditingNeighborId(neighbor.id); setShowNeighborForm(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Editar</button><button className="delete-action" onClick={() => void deleteNeighbor(neighbor)}>Eliminar</button></div></div></article>)}
-                {!neighbors.length && <div className="empty-state"><strong>Aún no hay vecinos.</strong><span>Pulse “Registrar vecino” para crear el primero y generar su QR.</span></div>}
-                {!!neighbors.length && !filteredNeighbors.length && <div className="empty-state"><strong>No se encontró ningún vecino.</strong><span>Revise el nombre o número de lote, o pulse “Limpiar búsqueda”.</span></div>}
+                {!activeNeighbors.length && <div className="empty-state"><strong>Aún no hay vecinos.</strong><span>Pulse “Registrar vecino” para crear el primero y generar su QR.</span></div>}
+                {!!activeNeighbors.length && !filteredNeighbors.length && <div className="empty-state"><strong>No se encontró ningún vecino.</strong><span>Revise el nombre o número de lote, o pulse “Limpiar búsqueda”.</span></div>}
               </div>
             </section>
           </div>
@@ -1624,13 +1717,13 @@ export default function VecinalApp() {
           <div className="admin-section">
             <SectionIntro title={selectedActivityIsContribution ? "Registrar quién pagó" : "Registrar asistencia o cumplimiento"} text={selectedActivityIsContribution ? "Marque Pagó o No pagó. Al guardar, el monto completo se registra automáticamente en el historial; no existen pagos incompletos." : "Revise cada vecino. Si una falta con multa fue pagada, marque Regularizó para guardar automáticamente el movimiento completo."} />
             {!selectedActivityData ? <div className="empty-state"><strong>Primero debe crear una actividad.</strong><span>Después podrá marcar presentes, faltas o justificaciones.</span></div> : (
-              <section className="admin-panel attendance-panel"><div className="attendance-select"><label>Registro<select value={selectedActivity} onChange={(event) => setSelectedActivity(Number(event.target.value))}>{activities.map((activity) => <option key={activity.id} value={activity.id}>{activityCategoryFromRowIndex(activity.cardRowIndex).label} · {activity.title}</option>)}</select></label><div><span>{selectedActivityIsContribution ? "Monto de la cuota" : "Multa configurada"}</span><strong>Bs {formatBs(selectedActivityData.fine)}</strong><small>{selectedActivityCategory.label}</small></div></div>
+              <section className="admin-panel attendance-panel" aria-busy={savingAttendance}><div className="attendance-select"><label>Registro<select value={selectedActivity} disabled={savingAttendance} onChange={(event) => setSelectedActivity(Number(event.target.value))}>{activities.map((activity) => <option key={activity.id} value={activity.id}>{activityCategoryFromRowIndex(activity.cardRowIndex).label} · {activity.title}</option>)}</select></label><div><span>{selectedActivityIsContribution ? "Monto de la cuota" : "Multa configurada"}</span><strong>Bs {formatBs(selectedActivityData.fine)}</strong><small>{selectedActivityCategory.label}</small></div></div>
                 <div className="status-meaning-note"><strong>{selectedActivityIsContribution ? "Control de cuota" : "Control de actividad"}</strong><span>{selectedActivityIsContribution ? "✓ pagó · × no pagó · — exento" : "✓ cumplió · × pendiente · ✓ regularizó · — justificado"}</span></div>
-                <div className="bulk-control-actions"><div><strong>Atajo para listas grandes</strong><span>Marque a todos y luego corrija únicamente las excepciones.</span></div><div>{selectedStatusOptions.filter((option) => option.value === "Presente" || option.value === "Faltó").map((option) => <button type="button" key={`all-${option.value}`} onClick={() => setAllControlStatus(option.value)}>Todos: {option.label.replace(/^.[ ]*/, "")}</button>)}<button type="button" className="clear-bulk" onClick={() => setAllControlStatus("Sin registrar")}>Limpiar selección</button></div></div>
-                <div className="neighbor-search-bar control-search-bar"><label htmlFor="control-search"><span>Buscar dentro de la lista</span><input id="control-search" type="search" value={controlSearch} onChange={(event) => setControlSearch(event.target.value)} placeholder="Nombre, calle, lote o código" autoComplete="off" /></label>{controlSearch && <button type="button" onClick={() => setControlSearch("")}>Mostrar todos</button>}<small>{controlSearch ? `${controlNeighbors.length} de ${activeNeighbors.length} vecino(s)` : `${activeNeighbors.length} vecino(s) en este control`}</small></div>
-                <div className="attendance-list">{controlNeighbors.map((neighbor) => { const currentStatus = selectedAttendance[neighbor.id] ?? "Sin registrar"; return <article className={currentStatus === "Sin registrar" ? "unregistered" : ""} key={neighbor.id}><div className="avatar">{neighbor.name.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div className="attendance-name"><strong>{neighbor.name}</strong><span>Lote {neighbor.lot} · {neighbor.code}{currentStatus === "Sin registrar" ? " · Falta elegir" : ""}</span></div><div className="attendance-buttons">{selectedStatusOptions.map((option) => <button type="button" key={option.value} className={currentStatus === option.value ? `selected ${option.value.toLowerCase().replace("ó", "o")}` : ""} onClick={() => setAttendanceByActivity((current) => ({ ...current, [selectedActivity]: { ...(current[selectedActivity] ?? {}), [neighbor.id]: option.value } }))}>{option.label}</button>)}</div></article>; })}</div>
-                {!neighbors.length && <div className="empty-state"><strong>No hay vecinos activos.</strong><span>Registre vecinos antes de guardar asistencia.</span></div>}
-                <div className="attendance-footer"><p><strong>{selectedUnregisteredCount ? `${selectedUnregisteredCount} falta(n) por elegir` : `${selectedPendingCount} registro(s) con ×`}</strong> · ✓ guardará el pago completo y el historial automáticamente.</p><button className="primary-action" disabled={!activeNeighbors.length || selectedUnregisteredCount > 0} onClick={() => void saveAttendance()}>{selectedUnregisteredCount ? "Complete toda la lista" : "Guardar control, historial y tarjeta"}</button></div>
+                <div className="bulk-control-actions"><div><strong>Atajo para listas grandes</strong><span>Marque solo a quienes desea registrar ahora y guarde. Puede continuar con los demás después.</span></div><div>{selectedStatusOptions.filter((option) => option.value === "Presente" || option.value === "Faltó").map((option) => <button type="button" disabled={savingAttendance} key={`all-${option.value}`} onClick={() => setAllControlStatus(option.value)}>Todos: {option.label.replace(/^.[ ]*/, "")}</button>)}<button type="button" className="clear-bulk" disabled={savingAttendance} onClick={() => setAllControlStatus("Sin registrar")}>Limpiar selección</button></div></div>
+                <div className="neighbor-search-bar control-search-bar"><label htmlFor="control-search"><span>Buscar dentro de la lista</span><input id="control-search" type="search" value={controlSearch} disabled={savingAttendance} onChange={(event) => setControlSearch(event.target.value)} placeholder="Nombre, calle, lote o código" autoComplete="off" /></label>{controlSearch && <button type="button" disabled={savingAttendance} onClick={() => setControlSearch("")}>Mostrar todos</button>}<small>{controlSearch ? `${controlNeighbors.length} de ${activeNeighbors.length} vecino(s)` : `${activeNeighbors.length} vecino(s) en este control`}</small></div>
+                <div className="attendance-list">{controlNeighbors.map((neighbor) => { const currentStatus = selectedAttendance[neighbor.id] ?? "Sin registrar"; return <article className={currentStatus === "Sin registrar" ? "unregistered" : ""} key={neighbor.id}><div className="avatar">{neighbor.name.split(" ").slice(0, 2).map((part) => part[0]).join("")}</div><div className="attendance-name"><strong>{neighbor.name}</strong><span>Lote {neighbor.lot} · {neighbor.code}{currentStatus === "Sin registrar" ? " · Falta elegir" : ""}</span></div><div className="attendance-buttons">{selectedStatusOptions.map((option) => <button type="button" disabled={savingAttendance} key={option.value} className={currentStatus === option.value ? `selected ${option.value.toLowerCase().replace("ó", "o")}` : ""} onClick={() => setAttendanceByActivity((current) => ({ ...current, [selectedActivity]: { ...(current[selectedActivity] ?? {}), [neighbor.id]: option.value } }))}>{option.label}</button>)}</div></article>; })}</div>
+                {!activeNeighbors.length && <div className="empty-state"><strong>No hay vecinos activos.</strong><span>Registre vecinos antes de guardar asistencia.</span></div>}
+                <div className="attendance-footer"><p><strong>{savingAttendance ? "Guardando una sola vez…" : selectedUnregisteredCount ? `${selectedUnregisteredCount} sin registrar; puede completarlos después` : `${selectedPendingCount} registro(s) con ×`}</strong> · ✓ solo se enviarán los cambios nuevos.</p><button className="primary-action" disabled={savingAttendance || !activeNeighbors.length} onClick={() => void saveAttendance()}>{savingAttendance ? "Guardando una sola vez…" : "Guardar los seleccionados"}</button></div>
               </section>
             )}
           </div>
@@ -1645,7 +1738,7 @@ export default function VecinalApp() {
                 <label>Vecino<select value={selectedPaymentNeighborId ?? ""} onChange={(event) => choosePaymentNeighbor(event.target.value ? Number(event.target.value) : null)}><option value="">Seleccione un vecino</option>{paymentNeighborOptions.map((neighbor) => <option key={neighbor.id} value={neighbor.id}>{neighbor.code} · {neighbor.name} · Lote {neighbor.lot}</option>)}</select></label>
               </div>
             </section>
-            {!neighbors.length ? <div className="empty-state payment-empty"><strong>No hay vecinos registrados.</strong><span>Registre al primer vecino para comenzar.</span></div> : !selectedPaymentNeighbor ? <div className="empty-state payment-empty"><strong>Seleccione un vecino para abrir su historial.</strong><span>Verá todos sus cargos, pagos y resultados guardados.</span></div> : <>
+            {!activeNeighbors.length ? <div className="empty-state payment-empty"><strong>No hay vecinos registrados.</strong><span>Registre al primer vecino para comenzar.</span></div> : !selectedPaymentNeighbor ? <div className="empty-state payment-empty"><strong>Seleccione un vecino para abrir su historial.</strong><span>Verá todos sus cargos, pagos y resultados guardados.</span></div> : <>
               <div className="summary-grid payment-account-summary">
                 <SummaryCard label="Generado" value={`Bs ${formatBs(selectedPaymentNeighbor.generated)}`} note="Cargos registrados" tone="blue" />
                 <SummaryCard label="Pagado" value={`Bs ${formatBs(selectedPaymentNeighbor.paid)}`} note="Dinero recibido" tone="green" />
@@ -1740,7 +1833,7 @@ export default function VecinalApp() {
         {section === "reportes" && (
           <div className="admin-section">
             <SectionIntro title="Reportes y respaldos" text="Descargue documentos listos para imprimir y copias editables para su archivo mensual." />
-            <div className="report-grid"><article className="report-card featured"><span>QR</span><h2>Todos los QR de vecinos</h2><p>Hoja carta con hasta 35 etiquetas por página. Cada recuadro mide exactamente 3,7 cm de ancho × 3,8 cm de alto; el QR ocupa casi todo el espacio y solo lleva el nombre pequeño debajo.</p><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR grandes</button></article><article className="report-card"><span>CSV</span><h2>Reporte de deudores</h2><p>Listado actualizado de vecinos con saldo pendiente.</p><button onClick={downloadDebtorsCsv}>Descargar deudores</button></article><article className="report-card"><span>Bs</span><h2>Libro general de ingresos</h2><p>Todos los pagos, comprobantes, vecinos, conceptos y métodos registrados.</p><button onClick={downloadIncomeLedgerCsv}>Descargar ingresos CSV</button></article><article className="report-card"><span>▦</span><h2>Padrón completo</h2><p>Vecinos, calles, lotes, teléfonos y códigos en una tabla editable.</p><button onClick={() => downloadRegistryCsv()}>Descargar padrón CSV</button></article><article className="report-card"><span>PDF</span><h2>Resumen mensual</h2><p>Actividades, multas generadas y pagos del mes actual.</p><button onClick={() => void downloadMonthlySummary()}>Generar resumen</button></article><article className="report-card"><span>↺</span><h2>Respaldo completo</h2><p>Copia de vecinos, actividades, asistencias, pagos, avisos y configuración.</p><button onClick={downloadFullBackup}>Descargar respaldo</button></article></div>
+            <div className="report-grid"><article className="report-card featured"><span>QR</span><h2>Todos los QR de vecinos vigentes</h2><p>Hoja carta con hasta 35 etiquetas por página. Cada recuadro mide exactamente 3,7 cm de ancho × 3,8 cm de alto; el QR ocupa casi todo el espacio y lleva el nombre pequeño. Si dos nombres son iguales, añade debajo el código único para no confundirlos. Descargue un PDF nuevo después de eliminar o corregir vecinos.</p><button className="yellow-action" onClick={downloadQrPdf}>Descargar PDF de QR grandes</button></article><article className="report-card"><span>CSV</span><h2>Reporte de deudores</h2><p>Listado actualizado de vecinos con saldo pendiente.</p><button onClick={downloadDebtorsCsv}>Descargar deudores</button></article><article className="report-card"><span>Bs</span><h2>Libro general de ingresos</h2><p>Todos los pagos, comprobantes, vecinos, conceptos y métodos registrados.</p><button onClick={downloadIncomeLedgerCsv}>Descargar ingresos CSV</button></article><article className="report-card"><span>▦</span><h2>Padrón vigente</h2><p>Solo los vecinos actuales, con calles, lotes, teléfonos y códigos en una tabla editable.</p><button onClick={() => downloadRegistryCsv()}>Descargar padrón CSV</button></article><article className="report-card"><span>PDF</span><h2>Resumen mensual</h2><p>Actividades, multas generadas y pagos del mes actual.</p><button onClick={() => void downloadMonthlySummary()}>Generar resumen</button></article><article className="report-card"><span>↺</span><h2>Respaldo completo</h2><p>Copia de vecinos, actividades, asistencias, pagos, avisos y configuración.</p><button onClick={downloadFullBackup}>Descargar respaldo</button></article></div>
             <div className="backup-status"><div className="backup-check">✓</div><div><strong>Datos protegidos</strong><p>La base principal está en Cloudflare D1 y el respaldo se descarga en formato JSON.</p></div><span>Gestión {viewLabels.managementYear}</span></div>
           </div>
         )}
